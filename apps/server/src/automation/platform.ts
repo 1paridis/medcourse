@@ -62,20 +62,34 @@ export async function readPlaylist(page: Page): Promise<{ courseUrl: string; cou
 
 export async function readPlayback(page: Page, chapterId: string): Promise<{ progress: PlaybackProgress; selected: boolean; ended: boolean; needsAttention: string | null }> {
   return page.evaluate(({ selector, videoSelector, id }) => {
+    const visibility = {
+      visible(element: Element) {
+        if (!element.getClientRects().length) return false;
+        for (let parent: Element | null = element; parent; parent = parent.parentElement) {
+          const style = getComputedStyle(parent);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0'
+            || parent.getAttribute('aria-hidden') === 'true') return false;
+        }
+        return true;
+      },
+    };
     const rows = [...document.querySelectorAll(selector)];
     const row = rows.find(row => row.id === id);
     const selected = !!row?.querySelector('.indexLeft.animat');
     const video = selected ? document.querySelector<HTMLVideoElement>(videoSelector) : null;
-    const login = [...document.querySelectorAll('input[type="password"]')].some(element => element.getClientRects().length > 0);
+    const login = [...document.querySelectorAll('input[type="password"]')].some(visibility.visible);
     // 只检查可见播放器告警及验证对话框，避免读取全页面完成文字。
-    const playerError = [...document.querySelectorAll('.by-player .by-player__error-overlay')].some(element => element.getClientRects().length > 0);
+    const playerError = [...document.querySelectorAll('.by-player .by-player__error-overlay')].some(visibility.visible);
     const warning = [...document.querySelectorAll('.videoLeft .jinggaoCard, .el-dialog, .el-message-box')]
-      .filter(element => element.getClientRects().length > 0).map(element => element.textContent?.trim() ?? '')
+      .filter(visibility.visible).map(element => element.textContent?.trim() ?? '')
       .find(text => /打卡|人脸|身份验证|验证码|重新登录|请.*登录|请依次|请.*完成.*学习|考试|签到/.test(text));
     return {
       selected,
       ended: !!video?.ended,
-      needsAttention: login ? '检测到登录表单，请重新人工登录' : warning ? '平台要求人工验证、考试或前置课程处理，请打开人工登录窗口处理' : null,
+      needsAttention: login ? '检测到登录表单，请重新人工登录'
+        : warning ? /打卡|签到/.test(warning) ? '平台弹出打卡验证，需要人工完成后继续播放'
+          : /人脸|身份验证|验证码/.test(warning) ? '平台要求身份验证，需要人工完成后继续播放'
+          : '平台要求重新登录、考试或前置课程处理，请打开人工登录窗口处理' : null,
       progress: {
         currentTime: video && Number.isFinite(video.currentTime) ? video.currentTime : null,
         duration: video && Number.isFinite(video.duration) && video.duration > 0 ? video.duration : null,
@@ -88,5 +102,6 @@ export async function readPlayback(page: Page, chapterId: string): Promise<{ pro
 }
 
 export function isPlatformVideoComplete(label: string | null): boolean {
-  return !!label && /^(已完成|已学完|学习完成|已学习|已考试)$/.test(label.trim());
+  // “待考试”表示视频学习已结束，考试是后续人工任务。
+  return !!label && /^(已完成|已学完|学习完成|已学习|待考试|已考试)$/.test(label.trim());
 }

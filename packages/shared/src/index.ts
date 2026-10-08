@@ -1,4 +1,7 @@
 export const PLATFORM_ORIGIN = 'https://yuancheng.henanyixue.com';
+export const VERIFICATION_RESTART_WINDOW_MS = 60_000;
+export const VERIFICATION_RESTART_MAX_ATTEMPTS = 5;
+export const VERIFICATION_RETRY_LIMIT_MESSAGE = '最近 1 分钟内已自动重启 5 次，已停止重试。请在播放窗口完成验证。';
 
 export type JobKind = 'login' | 'inspect' | 'playlist' | 'playback';
 export type JobStatus = 'idle' | 'queued' | 'running' | 'waiting_user' | 'paused' | 'needs_attention' | 'completed' | 'failed' | 'stopped' | 'interrupted';
@@ -67,6 +70,7 @@ export type WorkerCommand =
 export type WorkerEvent =
   | { type: 'log'; level: 'info' | 'error'; message: string }
   | { type: 'waiting_user'; message: string }
+  | { type: 'playback_resumed'; message: string }
   | { type: 'playlist'; courseUrl: string; courseTitle: string; items: PlaylistItem[] }
   | { type: 'progress'; progress: PlaybackProgress }
   | { type: 'done'; status: 'completed' | 'failed' | 'stopped' | 'paused' | 'needs_attention'; message: string; courseUrl?: string };

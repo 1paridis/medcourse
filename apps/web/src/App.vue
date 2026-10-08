@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import { PLATFORM_ORIGIN, ACTIVE_JOB_STATUSES, type Account, type Job, type JobKind, type JobLog, type JobStatus, type PlaybackState, type Overview } from '@medcourse/shared';
+import { PLATFORM_ORIGIN, ACTIVE_JOB_STATUSES, VERIFICATION_RETRY_LIMIT_MESSAGE, type Account, type Job, type JobKind, type JobLog, type JobStatus, type PlaybackState, type Overview } from '@medcourse/shared';
 import { api } from './api';
 
 const overview = ref<Overview>({ accounts: [], jobs: [], maxConcurrency: 1 });
@@ -14,6 +14,9 @@ const saving = ref(false);
 const busy = ref(new Set<string>());
 const selectedJob = ref<Job | null>(null);
 const logs = ref<JobLog[]>([]);
+const displayedLogs = computed(() => selectedJob.value?.kind === 'playback'
+  ? [...logs.value].sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id - a.id)
+  : logs.value);
 let timer: ReturnType<typeof setInterval> | undefined;
 let refreshing = false;
 const activeCount = computed(() => overview.value.jobs.filter(job => ACTIVE_JOB_STATUSES.includes(job.status)).length);
@@ -27,9 +30,20 @@ const playbackLabels: Record<PlaybackState, string> = { unknown: '尚未观测',
 const accountFilter = ref('');
 const currentPage = ref(1);
 const videoJobs = computed(() => overview.value.jobs.filter(job => job.kind === 'playback' && (!accountFilter.value || job.accountId === accountFilter.value))
-  .sort((a, b) => a.accountId.localeCompare(b.accountId) || a.url.localeCompare(b.url) || (a.position ?? 0) - (b.position ?? 0)));
+  .sort((a, b) => Number(a.status === 'completed') - Number(b.status === 'completed')
+    || a.accountId.localeCompare(b.accountId) || a.url.localeCompare(b.url) || (a.position ?? 0) - (b.position ?? 0)));
 const visibleVideoJobs = computed(() => videoJobs.value.slice((currentPage.value - 1) * 20, currentPage.value * 20));
 const serviceJobs = computed(() => overview.value.jobs.filter(job => job.kind !== 'playback'));
+const retryLimitJobs = computed(() => overview.value.jobs.filter(job => job.kind === 'playback'
+  && job.status === 'waiting_user' && job.detail.includes(VERIFICATION_RETRY_LIMIT_MESSAGE)));
+watch(retryLimitJobs, (jobs, previous) => {
+  const previousIds = new Set(previous.map(job => job.id));
+  for (const job of jobs) {
+    if (!previousIds.has(job.id)) ElMessage.warning({
+      message: `${accountLabel(job.accountId)}：${VERIFICATION_RETRY_LIMIT_MESSAGE}`, duration: 8000, showClose: true,
+    });
+  }
+});
 watch(accountFilter, () => { currentPage.value = 1; });
 function accountVideos(id: string) { return overview.value.jobs.filter(job => job.accountId === id && job.kind === 'playback'); }
 function canStartAll(account: Account) {
@@ -37,9 +51,10 @@ function canStartAll(account: Account) {
     && accountVideos(account.id).some(job => ['idle', 'paused', 'stopped', 'interrupted', 'failed', 'needs_attention'].includes(job.status));
 }
 function canPauseAll(id: string) {
-  return !busy.value.has(id) && accountVideos(id).some(job => ['queued', 'running'].includes(job.status));
+  return !busy.value.has(id) && accountVideos(id).some(job => ['queued', 'running', 'waiting_user'].includes(job.status));
 }
 function needsAttention(id: string) { return accountVideos(id).some(job => job.status === 'needs_attention'); }
+function waitingVerification(id: string) { return accountVideos(id).some(job => job.status === 'waiting_user'); }
 function startAll(account: Account) {
   void action(account.id, async () => {
     const result = await api<{ queued: number }>(`/accounts/${account.id}/start-all`, { method: 'POST' });
@@ -104,7 +119,7 @@ function accountLabel(id: string) { return overview.value.accounts.find(account 
 async function openLogs(job: Job) { selectedJob.value = job; logs.value = []; await refresh(); }
 function formatTime(value: string) { return new Date(value).toLocaleString('zh-CN', { hour12: false }); }
 
-onMounted(() => { void refresh(); timer = setInterval(() => { void refresh(); }, 2000); });
+onMounted(() => { void refresh(); timer = setInterval(() => { if (!document.hidden) void refresh(); }, 2000); });
 onUnmounted(() => { clearInterval(timer); });
 </script>
 
@@ -121,6 +136,8 @@ onUnmounted(() => { clearInterval(timer); });
       </section>
 
       <el-alert v-if="connectionError" :title="connectionError" type="error" show-icon :closable="false" class="notice" />
+      <el-alert v-for="job in retryLimitJobs" :key="job.id" title="自动重试已达上限" type="warning" show-icon :closable="false" class="notice"
+        :description="`${accountLabel(job.accountId)} · ${job.chapterTitle}：${VERIFICATION_RETRY_LIMIT_MESSAGE}`" />
       <section class="metrics" aria-label="运行概览">
         <article><span>已添加账号</span><strong>{{ overview.accounts.length }}</strong></article>
         <article><span>活动任务</span><strong>{{ activeCount }}</strong></article>
@@ -135,8 +152,9 @@ onUnmounted(() => { clearInterval(timer); });
             <div class="account-title"><span class="avatar">{{ account.name.slice(0, 1) }}</span><div><h3>{{ account.name }}</h3><span class="account-state">{{ account.loginState === 'saved' ? '登录状态已保存' : '尚未保存登录' }}</span></div></div>
             <p class="course-url" :title="account.courseUrl">{{ account.courseUrl }}</p>
             <div class="account-actions"><el-button type="primary" plain :disabled="accountBusy(account.id)" @click="start(account, 'login')">人工登录</el-button><el-button :disabled="accountBusy(account.id)" @click="start(account, 'inspect')">无头检查</el-button><el-button type="primary" :disabled="accountBusy(account.id) || account.loginState !== 'saved'" @click="start(account, 'playlist')">添加播放列表</el-button></div>
-            <div class="account-playback-controls"><span class="form-hint">每次播放一个视频，按列表顺序继续。</span><div><el-button type="primary" :disabled="!canStartAll(account)" :loading="busy.has(account.id)" @click="startAll(account)">开始</el-button><el-button :disabled="!canPauseAll(account.id)" :loading="busy.has(account.id)" @click="pauseAll(account)">暂停</el-button></div></div>
+            <div class="account-playback-controls"><span class="form-hint">每次播放一个视频，按列表顺序继续。出现打卡提示时自动暂停并重新开始。</span><div><el-button type="primary" :disabled="!canStartAll(account)" :loading="busy.has(account.id)" @click="startAll(account)">开始</el-button><el-button :disabled="!canPauseAll(account.id)" :loading="busy.has(account.id)" @click="pauseAll(account)">暂停</el-button></div></div>
             <p v-if="needsAttention(account.id)" class="form-hint">有视频需要人工处理，请先在登录窗口处理，再点击开始。</p>
+            <p v-if="waitingVerification(account.id)" class="form-hint">请在保留的播放窗口完成打卡或身份验证，完成后自动继续。无需重新登录或点击开始。</p>
           </article>
         </div>
       </section>
@@ -145,7 +163,7 @@ onUnmounted(() => { clearInterval(timer); });
         <div class="section-heading"><div><h2>视频任务 <span class="count-badge">{{ videoJobs.length }}</span></h2><p>在账号卡片统一开始或暂停。每个视频保留独立进度和平台状态。</p></div><el-select v-model="accountFilter" placeholder="全部账号" clearable aria-label="筛选账号" style="width: 160px"><el-option v-for="account in overview.accounts" :key="account.id" :label="account.name" :value="account.id" /></el-select></div>
         <el-table :data="visibleVideoJobs" row-key="id" empty-text="还没有视频任务，点击账号卡片的“添加播放列表”。" style="width: 100%">
           <el-table-column label="视频" min-width="220"><template #default="{ row }"><strong class="video-title">{{ row.position }}. {{ row.chapterTitle }}</strong><div class="video-meta">{{ accountLabel(row.accountId) }} · {{ row.courseTitle }}</div><div class="video-meta">列表时长：{{ row.durationText || '未知' }}</div></template></el-table-column>
-          <el-table-column label="任务状态" width="120"><template #default="{ row }"><el-tag :type="row.status === 'failed' ? 'danger' : row.status === 'needs_attention' ? 'warning' : row.status === 'completed' ? 'success' : 'info'">{{ labels[row.status as JobStatus] }}</el-tag><div class="video-meta">{{ row.sampledAt && row.status !== 'running' ? '上次：' : '' }}{{ playbackLabels[row.playbackState as PlaybackState] }}</div></template></el-table-column>
+          <el-table-column label="任务状态" width="140"><template #default="{ row }"><el-tag :type="row.status === 'failed' ? 'danger' : ['needs_attention', 'waiting_user'].includes(row.status) ? 'warning' : row.status === 'completed' ? 'success' : 'info'">{{ row.status === 'waiting_user' ? '等待人工验证' : labels[row.status as JobStatus] }}</el-tag><div class="video-meta">{{ row.sampledAt && !['running', 'waiting_user'].includes(row.status) ? '上次：' : '' }}{{ playbackLabels[row.playbackState as PlaybackState] }}</div></template></el-table-column>
           <el-table-column label="视频进度" min-width="185"><template #default="{ row }"><div>{{ videoTime(row.currentTime) }} / {{ videoTime(row.duration) }}</div><el-progress v-if="percentage(row) !== null" :percentage="percentage(row)!" :stroke-width="5" :status="row.playbackState === 'ended' ? 'success' : undefined" /><div v-else class="video-meta">等待播放器提供实际进度</div><div v-if="row.sampledAt" class="video-meta">采样 {{ formatTime(row.sampledAt) }}</div></template></el-table-column>
           <el-table-column label="平台状态" width="100"><template #default="{ row }">{{ row.platformStatus || '未知' }}</template></el-table-column>
           <el-table-column prop="detail" label="说明" min-width="175" show-overflow-tooltip />
@@ -177,7 +195,7 @@ onUnmounted(() => { clearInterval(timer); });
     </el-dialog>
     <el-drawer :model-value="!!selectedJob" title="任务日志" size="min(580px, 95vw)" @close="selectedJob = null">
       <div v-if="!logs.length" class="form-hint">暂无日志</div>
-      <article v-for="log in logs" :key="log.id" class="log-entry"><time>{{ formatTime(log.createdAt) }}</time><p :class="{ 'log-error': log.level === 'error' }">{{ log.message }}</p></article>
+      <article v-for="log in displayedLogs" :key="log.id" class="log-entry"><time>{{ formatTime(log.createdAt) }}</time><p :class="{ 'log-error': log.level === 'error' }">{{ log.message }}</p></article>
     </el-drawer>
   </div>
 </template>

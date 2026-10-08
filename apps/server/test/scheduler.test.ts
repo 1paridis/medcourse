@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fork } from 'node:child_process';
+import { fork, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -76,5 +76,70 @@ test('多账号并发时同账号视频串行，暂停保留进度并暂停该�
     await until(() => store.job(a1.id)?.status === 'running');
     assert.equal(await scheduler.stop(a1.id), true);
     assert.equal(store.job(a1.id)?.currentTime, 12);
+  } finally { await scheduler.close(); store.close(); rmSync(directory, { recursive: true }); }
+});
+
+test('等待验证保留账号和后续队列，恢复后回到运行中，等待期间支持暂停', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'medcourse-verification-'));
+  const store = new Store(':memory:');
+  let worker: ChildProcess;
+  const scheduler = new Scheduler(store, {
+    dataDir: directory, maxConcurrency: 1, channel: 'chromium',
+    workerFactory: () => {
+      worker = fork(fileURLToPath(new URL('./fixtures/worker.mjs', import.meta.url)), [], {
+        execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+      });
+      return worker;
+    },
+  });
+  const account = store.createAccount('A', PLATFORM_ORIGIN);
+  store.importPlaylist(account.id, PLATFORM_ORIGIN, '课程', ['verify', 'next'].map((id, index) => ({
+    chapterId: id, chapterTitle: id, position: index + 1, durationText: '', platformStatus: null,
+  })));
+  store.enqueueAll(account.id);
+  const first = store.jobs().find(job => job.chapterId === 'verify')!;
+  const second = store.jobs().find(job => job.chapterId === 'next')!;
+  try {
+    scheduler.pump();
+    await until(() => store.job(first.id)?.status === 'waiting_user');
+    assert.equal(scheduler.isAccountBusy(account.id), true);
+    assert.equal(store.job(second.id)?.status, 'queued');
+    assert.equal(scheduler.confirm(first.id), false, '验证任务不能被保存登录接口结束');
+    worker!.send({ type: 'confirm' }); // 测试进程模拟用户在平台窗口完成验证。
+    await until(() => store.job(first.id)?.status === 'running');
+    assert.equal(store.account(account.id)?.loginState, 'none');
+    assert.equal(store.job(second.id)?.status, 'queued');
+    store.updateJob(first.id, 'waiting_user', '再次等待验证');
+    assert.equal(await scheduler.pause(first.id), true);
+    assert.equal(store.job(first.id)?.status, 'paused');
+    assert.equal(store.job(first.id)?.currentTime, 12);
+    assert.equal(store.job(second.id)?.status, 'paused');
+  } finally { await scheduler.close(); store.close(); rmSync(directory, { recursive: true }); }
+});
+
+test('上一视频结束且待考试时保留平台状态，自动启动同账号下一视频', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'medcourse-next-video-'));
+  const store = new Store(':memory:');
+  const scheduler = new Scheduler(store, {
+    dataDir: directory, maxConcurrency: 1, channel: 'chromium',
+    workerFactory: () => fork(fileURLToPath(new URL('./fixtures/worker.mjs', import.meta.url)), [], {
+      execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+    }),
+  });
+  const account = store.createAccount('A', PLATFORM_ORIGIN);
+  store.importPlaylist(account.id, PLATFORM_ORIGIN, '课程', ['complete-exam', 'next', 'third'].map((id, index) => ({
+    chapterId: id, chapterTitle: id, position: index + 1, durationText: '', platformStatus: null,
+  })));
+  store.enqueueAll(account.id);
+  const first = store.jobs().find(job => job.chapterId === 'complete-exam')!;
+  const next = store.jobs().find(job => job.chapterId === 'next')!;
+  const third = store.jobs().find(job => job.chapterId === 'third')!;
+  try {
+    scheduler.pump();
+    await until(() => store.job(first.id)?.status === 'completed' && store.job(next.id)?.currentTime === 12);
+    assert.equal(store.job(first.id)?.platformStatus, '待考试');
+    assert.equal(store.job(first.id)?.currentTime, 100);
+    assert.equal(store.job(next.id)?.status, 'running');
+    assert.equal(store.job(third.id)?.status, 'queued');
   } finally { await scheduler.close(); store.close(); rmSync(directory, { recursive: true }); }
 });

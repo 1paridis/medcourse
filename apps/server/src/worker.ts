@@ -1,15 +1,26 @@
 import { readFile, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, type BrowserContext, type Page } from 'playwright';
-import { PLATFORM_ORIGIN, type WorkerCommand, type WorkerEvent } from '@medcourse/shared';
+import { PLATFORM_ORIGIN, VERIFICATION_RESTART_MAX_ATTEMPTS, VERIFICATION_RESTART_WINDOW_MS, VERIFICATION_RETRY_LIMIT_MESSAGE, type PlaybackProgress, type WorkerCommand, type WorkerEvent } from '@medcourse/shared';
 import { inspectPage, isPlatformUrl, courseUrl, readPlaylist, readPlayback, isPlatformVideoComplete, PLAYLIST_SELECTOR, VIDEO_SELECTOR } from './automation/platform.js';
+import { isPlaybackVerification, monitorPlayback, runPlaybackWithRestarts, VerificationRestartBudget, waitForPlaybackCheck } from './automation/playback.js';
 
 let context: BrowserContext | undefined;
 let command: Extract<WorkerCommand, { type: 'start' }> | undefined;
 let playbackPage: Page | undefined;
 let finished = false;
 let waiting = false;
+const verificationRestarts = new VerificationRestartBudget();
+let pendingRestart: { id: string; attempt: number; progress: PlaybackProgress; baseline: number | null } | undefined;
+
+function logVerification(event: string, fields: Record<string, unknown>): void {
+  send({ type: 'log', level: 'info', message: `验证事件：${JSON.stringify({
+    event, recordedAt: new Date().toISOString(), chapterId: command?.job.chapterId,
+    verificationId: pendingRestart?.id, ...fields,
+  })}` });
+}
 
 function send(event: WorkerEvent): void {
   if (process.connected) process.send?.(event, () => {});
@@ -26,6 +37,10 @@ async function snapshot(): Promise<void> {
 async function finish(status: 'completed' | 'failed' | 'stopped' | 'paused' | 'needs_attention', message: string, selectedCourseUrl?: string): Promise<void> {
   if (finished) return;
   finished = true;
+  if (pendingRestart) {
+    logVerification('restart_interrupted', { attempt: pendingRestart.attempt, status, reason: message });
+    pendingRestart = undefined;
+  }
   if (playbackPage) {
     await playbackPage.locator(VIDEO_SELECTOR).evaluateAll(videos => videos.forEach(video => (video as HTMLVideoElement).pause())).catch(() => {});
     await snapshot().catch(() => {});
@@ -35,10 +50,9 @@ async function finish(status: 'completed' | 'failed' | 'stopped' | 'paused' | 'n
   if (process.connected) process.disconnect();
 }
 
-async function play(page: Page): Promise<void> {
+async function play(page: Page): Promise<'restart' | void> {
   const id = command?.job.chapterId;
   if (!id) throw new Error('视频任务缺少章节标识');
-  playbackPage = page;
   const playlist = await readPlaylist(page);
   if (!playlist.items.some(item => item.chapterId === id)) throw new Error('播放列表已变化，未找到目标视频；请重新读取列表');
   const item = page.locator(PLAYLIST_SELECTOR).filter({ has: page.locator('.indexLeft.animat') });
@@ -51,60 +65,95 @@ async function play(page: Page): Promise<void> {
     }, id);
   }
   await page.waitForFunction(({ selector, id }) => [...document.querySelectorAll(selector)]
-    .some(row => row.id === id && !!row.querySelector('.indexLeft.animat')), { selector: PLAYLIST_SELECTOR, id }, { timeout: 15_000 });
+    .some(row => row.id === id && !!row.querySelector('.indexLeft.animat')), { selector: PLAYLIST_SELECTOR, id }, { timeout: 15_000, polling: 1000 });
   const initial = await readPlayback(page, id);
-  if (initial.needsAttention) { await finish('needs_attention', initial.needsAttention); return; }
+  if (initial.needsAttention && !isPlaybackVerification(initial.needsAttention)) { await finish('needs_attention', initial.needsAttention); return; }
+  if (isPlatformVideoComplete(initial.progress.platformStatus)) {
+    // 已学完的视频无需重播；保留已记录的末尾进度，避免初始化时间覆盖它。
+    const message = initial.progress.platformStatus?.trim() === '待考试'
+      ? '平台已确认本视频学习结束（待考试）；继续下一视频，考试需人工处理'
+      : '平台已确认本视频学习结束，无需重播，继续下一视频';
+    await finish('completed', message);
+    return;
+  }
+  playbackPage = page;
   try { await page.locator(VIDEO_SELECTOR).first().waitFor({ state: 'visible', timeout: 15_000 }); }
   catch { await finish('needs_attention', '目标视频暂不可播放，请检查前置学习状态或平台验证'); return; }
   if (finished) return;
-  await page.locator(VIDEO_SELECTOR).first().evaluate(async element => {
-    const video = element as HTMLVideoElement;
-    video.muted = true;
-    try { await video.play(); } catch { /* 使用网站播放按钮作为后备。 */ }
-  });
-  if ((await readPlayback(page, id)).progress.playbackState === 'paused') {
-    const button = page.locator('.by-player .by-player__play-btn--center, .by-player .by-player__control-bar button[aria-label="播放"]');
-    if (await button.first().isVisible()) await button.first().click();
-  }
-  send({ type: 'log', level: 'info', message: '开始记录目标视频的实际进度；静音播放，沿用平台默认速度' });
-  let previousTime: number | null = null;
-  let lastAdvance = Date.now();
-  let endedAt: number | undefined;
-  while (!finished) {
-    const state = await readPlayback(page, id);
+  async function resumeVideo(): Promise<void> {
     if (finished) return;
-    if (state.needsAttention) { await finish('needs_attention', state.needsAttention); return; }
-    if (!state.selected) { await finish('needs_attention', '网站切换了章节，已停止记录；请确认目标视频'); return; }
-    send({ type: 'progress', progress: state.progress });
-    if (state.progress.playbackState === 'error') { await finish('needs_attention', '播放器报告播放错误，进度已保存，请人工处理'); return; }
-    if (state.ended) {
-      endedAt ??= Date.now();
-      if (isPlatformVideoComplete(state.progress.platformStatus)) {
-        await finish('completed', '视频播放结束，平台已确认本视频学习状态'); return;
-      }
-      if (Date.now() - endedAt >= 30_000) {
-        await finish('needs_attention', '视频已结束，平台完成状态未确认；进度已保存'); return;
-      }
-    } else {
-      if (state.progress.currentTime !== null && previousTime !== null && state.progress.currentTime > previousTime + 0.05) lastAdvance = Date.now();
-      previousTime = state.progress.currentTime;
-      if (Date.now() - lastAdvance > 60_000) {
-        await finish('needs_attention', '视频进度超过 60 秒未增长，请检查缓冲、播放限制或验证'); return;
-      }
+    await page.locator(VIDEO_SELECTOR).first().evaluate(async element => {
+      const video = element as HTMLVideoElement;
+      video.muted = true;
+      try { await video.play(); } catch { /* 使用网站播放按钮作为后备。 */ }
+    });
+    const state = await readPlayback(page, id!);
+    if (!finished && !state.needsAttention && state.selected && state.progress.playbackState === 'paused') {
+      const button = page.locator('.by-player .by-player__play-btn--center, .by-player .by-player__control-bar button[aria-label="播放"]');
+      if (await button.first().isVisible()) await button.first().click();
     }
-    await delay(1000);
   }
+  if (!initial.needsAttention) await resumeVideo();
+  const started = await readPlayback(page, id);
+  if (pendingRestart) {
+    pendingRestart.baseline = started.progress.currentTime;
+    logVerification('restart_opened', { attempt: pendingRestart.attempt, progress: started.progress, reason: started.needsAttention });
+  }
+  send({ type: 'log', level: 'info', message: '按人工观看节奏静音播放，沿用平台默认速度；每 5 秒读取播放器属性记录进度，结束和报错由媒体事件触发检查' });
+  return monitorPlayback(started, {
+    read: () => readPlayback(page, id),
+    wait: (timeoutMs, observeMedia) => waitForPlaybackCheck(page, timeoutMs, observeMedia),
+    progress: progress => {
+      send({ type: 'progress', progress });
+      if (pendingRestart && progress.playbackState === 'playing' && progress.currentTime !== null
+        && pendingRestart.baseline !== null && progress.currentTime > pendingRestart.baseline + 0.05) {
+        logVerification('restart_progress_resumed', { attempt: pendingRestart.attempt,
+          triggeredAt: pendingRestart.progress.sampledAt, previousTime: pendingRestart.progress.currentTime,
+          restoredTime: pendingRestart.baseline, progress });
+        pendingRestart = undefined;
+      }
+    },
+    finish,
+    isFinished: () => finished,
+    onAttention: async (message, progress) => {
+      if (finished) return;
+      const checkin = message.includes('打卡验证');
+      const attempt = checkin ? verificationRestarts.request() : null;
+      if (pendingRestart) {
+        logVerification('restart_verification_returned', { attempt: pendingRestart.attempt, progress });
+        pendingRestart = undefined;
+      }
+      const verificationId = randomUUID();
+      logVerification('verification_detected', { verificationId, kind: checkin ? 'checkin' : 'identity', reason: message,
+        progress, action: attempt !== null ? 'pause_and_restart' : 'wait_for_user', attempt });
+      if (attempt !== null) {
+        pendingRestart = { id: verificationId, attempt, progress, baseline: null };
+        send({ type: 'log', level: 'info', message: `检测到打卡提示，保存实际进度后暂停并重新启动当前视频（1 分钟内第 ${attempt}/${VERIFICATION_RESTART_MAX_ATTEMPTS} 次）` });
+        return 'restart';
+      }
+      await page.bringToFront();
+      const detail = checkin ? VERIFICATION_RETRY_LIMIT_MESSAGE : '请在保留的播放窗口操作，验证后自动继续';
+      if (checkin) logVerification('restart_limit_reached', { verificationId, progress,
+        windowMs: VERIFICATION_RESTART_WINDOW_MS, maxAttempts: VERIFICATION_RESTART_MAX_ATTEMPTS });
+      send({ type: 'waiting_user', message: `${message}；${detail}` });
+      send({ type: 'log', level: 'info', message: `${message}；播放窗口已保留，等待人工验证` });
+    },
+    onResume: async () => {
+      await resumeVideo();
+      logVerification('manual_prompt_cleared', {});
+      if (!finished) send({ type: 'playback_resumed', message: '平台验证提示已消失，继续播放并记录实际进度' });
+    },
+  });
 }
 
-async function start(input: Extract<WorkerCommand, { type: 'start' }>): Promise<void> {
-  command = input;
-  if (!isPlatformUrl(input.job.url)) throw new Error('任务地址不属于目标平台');
+async function openPage(input: Extract<WorkerCommand, { type: 'start' }>): Promise<Page | undefined> {
   context = await chromium.launchPersistentContext(input.profileDir, {
-    channel: input.channel, headless: input.job.kind !== 'login',
+    channel: input.channel, headless: !['login', 'playback'].includes(input.job.kind),
     viewport: { width: 1360, height: 900 }, locale: 'zh-CN',
   });
   if (finished) { await context.close(); return; }
-  context.on('close', () => { void finish('stopped', '浏览器窗口已关闭'); });
+  const openedContext = context;
+  context.on('close', () => { if (context === openedContext) void finish('stopped', '浏览器窗口已关闭'); });
   context.setDefaultTimeout(15_000);
   try {
     const storage = JSON.parse(await readFile(join(input.profileDir, '_sessionStorage.json'), 'utf8')) as Record<string, string>;
@@ -130,6 +179,14 @@ async function start(input: Extract<WorkerCommand, { type: 'start' }>): Promise<
     ? `${baseCourse}/${encodeURIComponent(input.job.chapterId!)}` : input.job.url;
   await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   if (finished) return;
+  return page;
+}
+
+async function start(input: Extract<WorkerCommand, { type: 'start' }>): Promise<void> {
+  command = input;
+  if (!isPlatformUrl(input.job.url)) throw new Error('任务地址不属于目标平台');
+  const page = await openPage(input);
+  if (!page || finished) return;
   if (input.job.kind === 'login') {
     waiting = true;
     send({ type: 'waiting_user', message: '请在浏览器中人工登录并进入课程，再点击“保存登录”' });
@@ -142,7 +199,25 @@ async function start(input: Extract<WorkerCommand, { type: 'start' }>): Promise<
     await finish('completed', `播放列表已读取，共 ${playlist.items.length} 个视频；已有任务进度保留`);
     return;
   }
-  if (input.job.kind === 'playback') { await play(page); return; }
+  if (input.job.kind === 'playback') {
+    await runPlaybackWithRestarts(page, {
+      play,
+      pause: async page => {
+        await page.locator(VIDEO_SELECTOR).evaluateAll(videos => videos.forEach(video => (video as HTMLVideoElement).pause()));
+        await snapshot();
+      },
+      close: async () => {
+        const previousContext = context;
+        context = undefined;
+        playbackPage = undefined;
+        await previousContext?.close();
+        logVerification('restart_browser_closed', { attempt: pendingRestart?.attempt });
+      },
+      open: () => openPage(input),
+      isFinished: () => finished,
+    });
+    return;
+  }
   await delay(2500);
   if (finished) return;
   const info = await inspectPage(page);

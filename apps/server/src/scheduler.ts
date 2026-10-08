@@ -47,6 +47,10 @@ export class Scheduler {
         if (!event || typeof event !== 'object') return;
         if (event.type === 'log') this.store.log(job.id, event.level, event.message);
         if (event.type === 'waiting_user') this.store.updateJob(job.id, 'waiting_user', event.message);
+        if (event.type === 'playback_resumed' && job.kind === 'playback' && this.store.job(job.id)?.status === 'waiting_user') {
+          this.store.updateJob(job.id, 'running', event.message);
+          this.store.log(job.id, 'info', event.message);
+        }
         if (event.type === 'progress' && job.kind === 'playback') this.store.updateProgress(job.id, event.progress);
         if (event.type === 'playlist' && job.kind === 'playlist') {
           try {
@@ -83,7 +87,8 @@ export class Scheduler {
 
   confirm(id: string): boolean {
     const running = this.running.get(id);
-    if (!running || this.store.job(id)?.status !== 'waiting_user') return false;
+    const job = this.store.job(id);
+    if (!running || job?.kind !== 'login' || job.status !== 'waiting_user') return false;
     running.child.send({ type: 'confirm' }, () => {});
     return true;
   }
@@ -111,7 +116,7 @@ export class Scheduler {
 
   async pause(id: string): Promise<boolean> {
     const job = this.store.job(id);
-    if (!job || job.kind !== 'playback' || !['queued', 'running'].includes(job.status)) return false;
+    if (!job || job.kind !== 'playback' || !['queued', 'running', 'waiting_user'].includes(job.status)) return false;
     const running = this.running.get(id);
     this.store.pauseQueuedAccount(job.accountId);
     if (running) await this.terminate(running, 'pause');

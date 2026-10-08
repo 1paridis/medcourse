@@ -15,6 +15,9 @@ test('课程身份归一化保留项目，移除当前视频；拒绝首页、�
 
 test('视频完成仅接受明确平台状态，不将百分比或未学习误判为完成', () => {
   assert.equal(isPlatformVideoComplete('已完成'), true);
+  assert.equal(isPlatformVideoComplete('待考试'), true);
+  assert.equal(isPlatformVideoComplete(' 待考试 '), true);
+  assert.equal(isPlatformVideoComplete('暂无法考试'), false);
   assert.equal(isPlatformVideoComplete('未学习'), false);
   assert.equal(isPlatformVideoComplete('未完成'), false);
   assert.equal(isPlatformVideoComplete('学习中'), false);
@@ -47,4 +50,32 @@ test('进度采样脚本可在浏览器独立作用域执行，且只读取目�
   assert.equal(other.selected, false);
   assert.equal(other.progress.currentTime, null);
   assert.equal(other.progress.duration, null);
+});
+
+test('隐藏但占位的验证弹窗不打断播放，可见打卡提示给出具体原因', async () => {
+  const { runInNewContext } = await import('node:vm');
+  const { readPlayback, PLAYLIST_SELECTOR } = await import('../src/automation/platform.js');
+  const style = { display: 'block', visibility: 'visible', opacity: '1' };
+  const wrapper = { style: { ...style }, parentElement: null, getAttribute: () => null };
+  const dialog = {
+    textContent: '打卡 根据继续医学教育的最新要求，请您在观看课件过程中打卡',
+    getClientRects: () => [{}], parentElement: wrapper, style: { ...style },
+    getAttribute: () => null,
+  };
+  const video = { currentTime: 35, duration: 100, readyState: 4, paused: false, ended: false, error: null };
+  const row = { id: 'target', querySelector: () => ({ textContent: '学习中' }) };
+  const document = {
+    querySelectorAll: (selector: string) => selector === PLAYLIST_SELECTOR ? [row]
+      : selector.includes('.jinggaoCard') ? [dialog] : [],
+    querySelector: () => video,
+  };
+  const page = { evaluate: (fn: Function, input: unknown) => runInNewContext(`(${fn.toString()})(input)`, {
+    document, input, getComputedStyle: (element: typeof dialog) => element.style,
+  }) };
+  for (const hidden of [{ visibility: 'hidden' }, { opacity: '0' }, { display: 'none' }]) {
+    wrapper.style = { ...style, ...hidden };
+    assert.equal((await readPlayback(page as never, 'target')).needsAttention, null);
+  }
+  wrapper.style = { ...style };
+  assert.match((await readPlayback(page as never, 'target')).needsAttention!, /打卡验证/);
 });
