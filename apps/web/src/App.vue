@@ -152,9 +152,9 @@ onUnmounted(() => { clearInterval(timer); });
             <div class="account-title"><span class="avatar">{{ account.name.slice(0, 1) }}</span><div><h3>{{ account.name }}</h3><span class="account-state">{{ account.loginState === 'saved' ? '登录状态已保存' : '尚未保存登录' }}</span></div></div>
             <p class="course-url" :title="account.courseUrl">{{ account.courseUrl }}</p>
             <div class="account-actions"><el-button type="primary" plain :disabled="accountBusy(account.id)" @click="start(account, 'login')">人工登录</el-button><el-button :disabled="accountBusy(account.id)" @click="start(account, 'inspect')">无头检查</el-button><el-button type="primary" :disabled="accountBusy(account.id) || account.loginState !== 'saved'" @click="start(account, 'playlist')">添加播放列表</el-button></div>
-            <div class="account-playback-controls"><span class="form-hint">每次播放一个视频，按列表顺序继续。出现打卡提示时自动暂停并重新开始。</span><div><el-button type="primary" :disabled="!canStartAll(account)" :loading="busy.has(account.id)" @click="startAll(account)">开始</el-button><el-button :disabled="!canPauseAll(account.id)" :loading="busy.has(account.id)" @click="pauseAll(account)">暂停</el-button></div></div>
+            <div class="account-playback-controls"><span class="form-hint">使用无头浏览器在后台播放，每次一个视频，按列表顺序继续。出现打卡提示时自动暂停并重新开始。</span><div><el-button type="primary" :disabled="!canStartAll(account)" :loading="busy.has(account.id)" @click="startAll(account)">开始</el-button><el-button :disabled="!canPauseAll(account.id)" :loading="busy.has(account.id)" @click="pauseAll(account)">暂停</el-button></div></div>
             <p v-if="needsAttention(account.id)" class="form-hint">有视频需要人工处理，请先在登录窗口处理，再点击开始。</p>
-            <p v-if="waitingVerification(account.id)" class="form-hint">请在保留的播放窗口完成打卡或身份验证，完成后自动继续。无需重新登录或点击开始。</p>
+            <p v-if="waitingVerification(account.id)" class="form-hint">请先暂停，再通过“人工登录”完成打卡或身份验证，保存登录后点击“开始”继续播放。</p>
           </article>
         </div>
       </section>

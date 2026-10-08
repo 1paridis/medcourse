@@ -131,12 +131,11 @@ async function play(page: Page): Promise<'restart' | void> {
         send({ type: 'log', level: 'info', message: `检测到打卡提示，保存实际进度后暂停并重新启动当前视频（1 分钟内第 ${attempt}/${VERIFICATION_RESTART_MAX_ATTEMPTS} 次）` });
         return 'restart';
       }
-      await page.bringToFront();
-      const detail = checkin ? VERIFICATION_RETRY_LIMIT_MESSAGE : '请在保留的播放窗口操作，验证后自动继续';
+      const detail = checkin ? VERIFICATION_RETRY_LIMIT_MESSAGE : '请先暂停，再通过“人工登录”完成验证，保存登录后点击“开始”';
       if (checkin) logVerification('restart_limit_reached', { verificationId, progress,
         windowMs: VERIFICATION_RESTART_WINDOW_MS, maxAttempts: VERIFICATION_RESTART_MAX_ATTEMPTS });
       send({ type: 'waiting_user', message: `${message}；${detail}` });
-      send({ type: 'log', level: 'info', message: `${message}；播放窗口已保留，等待人工验证` });
+      send({ type: 'log', level: 'info', message: `${message}；无头播放正在等待，请先暂停，再通过“人工登录”处理验证` });
     },
     onResume: async () => {
       await resumeVideo();
@@ -148,7 +147,7 @@ async function play(page: Page): Promise<'restart' | void> {
 
 async function openPage(input: Extract<WorkerCommand, { type: 'start' }>): Promise<Page | undefined> {
   context = await chromium.launchPersistentContext(input.profileDir, {
-    channel: input.channel, headless: !['login', 'playback'].includes(input.job.kind),
+    channel: input.channel, headless: input.job.kind !== 'login',
     viewport: { width: 1360, height: 900 }, locale: 'zh-CN',
   });
   if (finished) { await context.close(); return; }
@@ -200,6 +199,7 @@ async function start(input: Extract<WorkerCommand, { type: 'start' }>): Promise<
     return;
   }
   if (input.job.kind === 'playback') {
+    send({ type: 'log', level: 'info', message: '使用无头浏览器在后台播放视频' });
     await runPlaybackWithRestarts(page, {
       play,
       pause: async page => {
