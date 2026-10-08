@@ -1,0 +1,26 @@
+{
+  "name": "medcourse",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24",
+    "npm": ">=10"
+  },
+  "scripts": {
+    "dev": "npm run build -w @medcourse/shared && node scripts/dev.mjs",
+    "build": "npm run build -w @medcourse/shared && npm run build -w @medcourse/server && npm run build -w @medcourse/web",
+    "typecheck": "npm run build -w @medcourse/shared && npm run typecheck --workspaces --if-present",
+    "test": "npm run build -w @medcourse/shared && npm run test -w @medcourse/server",
+    "start": "npm run start -w @medcourse/server",
+    "browser:install": "node --env-file-if-exists=.env scripts/install-browser.mjs"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3",
+    "@types/node": "^24.0.0"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@medcourse/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@medcourse/shared": "*",
+    "element-plus": "^2.14.7",
+    "vue": "^3.5.43"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.9",
+    "vite": "^8.3.3",
+    "vue-tsc": "^3.3.12"
+  }
+}
