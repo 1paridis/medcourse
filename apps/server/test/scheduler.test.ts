@@ -18,6 +18,37 @@ async function until(predicate: () => boolean) {
   }
 }
 
+test('课程名称读取复用登录子进程和账号会话，独立读取受并发及账号锁约束', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'medcourse-name-'));
+  const store = new Store(':memory:');
+  let workers = 0;
+  const scheduler = new Scheduler(store, { dataDir: directory, maxConcurrency: 1, channel: 'chromium', workerFactory: () => {
+    workers++;
+    return fork(fileURLToPath(new URL('./fixtures/worker.mjs', import.meta.url)), [], { execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+  } });
+  const user = store.createUser('A');
+  const [account] = store.bindPlatforms(user.id, ['huayi']);
+  const other = store.createAccount('B', PLATFORM_ORIGIN);
+  const url = 'https://cme28.91huayi.com/pages/course.aspx?cid=p';
+  try {
+    const standalone = scheduler.readCourseName(account!.id, url);
+    assert.equal(scheduler.isAccountBusy(account!.id), true);
+    await assert.rejects(scheduler.readCourseName(account!.id, url), /正在读取/);
+    await assert.rejects(scheduler.readCourseName(other.id, `${PLATFORM_ORIGIN}/#/remoteProject/studyInterface/p`), /其他任务/);
+    assert.equal(await standalone, '自动读取的课程名称');
+    assert.equal(scheduler.isAccountBusy(account!.id), false);
+    const login = store.createJob(account!.id, 'login', 'https://91huayi.com/');
+    scheduler.pump();
+    await until(() => store.job(login.id)?.status === 'waiting_user');
+    const before = workers;
+    assert.equal(await scheduler.readCourseName(account!.id, url), '自动读取的课程名称');
+    assert.equal(workers, before);
+    assert.equal(store.job(login.id)?.status, 'waiting_user');
+    assert.equal(scheduler.confirm(login.id), true);
+    await until(() => store.job(login.id)?.status === 'completed');
+  } finally { await scheduler.close(); store.close(); rmSync(directory, { recursive: true }); }
+});
+
 test('子进程调度遵守并发上限，停止后启动队列下一项，并保存人工确认', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'medcourse-scheduler-'));
   const store = new Store(':memory:');
@@ -141,5 +172,165 @@ test('上一视频结束且待考试时保留平台状态，自动启动同账�
     assert.equal(store.job(first.id)?.currentTime, 100);
     assert.equal(store.job(next.id)?.status, 'running');
     assert.equal(store.job(third.id)?.status, 'queued');
+  } finally { await scheduler.close(); store.close(); rmSync(directory, { recursive: true }); }
+});
+
+test('读取指定课程的结果关联该课程，保存登录不覆盖其他课程链接', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'medcourse-course-playlist-'));
+  const store = new Store(':memory:');
+  const scheduler = new Scheduler(store, {
+    dataDir: directory, maxConcurrency: 1, channel: 'chromium',
+    workerFactory: () => fork(fileURLToPath(new URL('./fixtures/worker.mjs', import.meta.url)), [], { execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }),
+  });
+  const account = store.createAccount('A', PLATFORM_ORIGIN);
+  const a = store.createCourse(account.id, '课程 A', `${PLATFORM_ORIGIN}/#/remoteProject/studyInterface/a`);
+  const b = store.createCourse(account.id, '课程 B', `${PLATFORM_ORIGIN}/#/remoteProject/studyInterface/b`);
+  try {
+    for (const course of [a, b]) {
+      const task = store.createJob(account.id, 'playlist', course.learningUrl, course.id);
+      scheduler.pump();
+      await until(() => store.job(task.id)?.status === 'completed' && !scheduler.isAccountBusy(account.id));
+      assert.equal(store.courseJobs(course.id).filter(job => job.kind === 'playback').length, 1);
+    }
+    assert.equal(store.course(a.id)?.learningUrl, a.learningUrl);
+    assert.equal(store.course(b.id)?.learningUrl, b.learningUrl);
+    assert.equal(store.jobs().filter(job => job.kind === 'playback').length, 2);
+  } finally { await scheduler.close(); store.close(); rmSync(directory, { recursive: true }); }
+});
+
+test('移除正在运行的课程先阻止后续章节启动，保留进度，再继续其他课程', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'medcourse-course-archive-'));
+  const store = new Store(':memory:');
+  const scheduler = new Scheduler(store, {
+    dataDir: directory, maxConcurrency: 1, channel: 'chromium',
+    workerFactory: () => fork(fileURLToPath(new URL('./fixtures/worker.mjs', import.meta.url)), [], { execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }),
+  });
+  const account = store.createAccount('A', PLATFORM_ORIGIN);
+  const a = store.createCourse(account.id, '课程 A', `${PLATFORM_ORIGIN}/#/remoteProject/studyInterface/a`);
+  const b = store.createCourse(account.id, '课程 B', `${PLATFORM_ORIGIN}/#/remoteProject/studyInterface/b`);
+  const list = ['first', 'next'].map((id, index) => ({ chapterId: id, chapterTitle: id, position: index + 1, durationText: '', platformStatus: null }));
+  store.importPlaylist(account.id, a.learningUrl, a.name, list, a.id);
+  store.importPlaylist(account.id, b.learningUrl, b.name, list.slice(0, 1), b.id);
+  store.enqueueAll(account.id);
+  const first = store.courseJobs(a.id).find(job => job.chapterId === 'first')!;
+  const next = store.courseJobs(a.id).find(job => job.chapterId === 'next')!;
+  const other = store.courseJobs(b.id)[0]!;
+  try {
+    scheduler.pump();
+    await until(() => store.job(first.id)?.currentTime === 12);
+    assert.equal(await scheduler.archiveCourse(a.id), true);
+    assert.ok(store.course(a.id)?.archivedAt);
+    assert.equal(store.job(first.id)?.currentTime, 12);
+    assert.equal(store.job(first.id)?.status, 'stopped');
+    assert.equal(store.job(next.id)?.status, 'stopped');
+    await until(() => store.job(other.id)?.currentTime === 12);
+    assert.equal(store.job(other.id)?.status, 'running');
+    assert.equal(store.enqueue(first.id), false);
+  } finally { await scheduler.close(); store.close(); rmSync(directory, { recursive: true }); }
+});
+
+
+test('华医网首页登录任务正常调度、确认和释放账号，不生成视频任务', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'medcourse-huayi-login-'));
+  const store = new Store(':memory:');
+  const scheduler = new Scheduler(store, {
+    dataDir: directory, maxConcurrency: 1, channel: 'chromium',
+    workerFactory: () => fork(fileURLToPath(new URL('./fixtures/worker.mjs', import.meta.url)), [], { execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }),
+  });
+  const user = store.createUser('A');
+  const [account] = store.bindPlatforms(user.id, ['huayi']);
+  const job = store.createJob(account!.id, 'login', 'https://91huayi.com/');
+  try {
+    scheduler.pump();
+    await until(() => store.job(job.id)?.status === 'waiting_user');
+    assert.equal(scheduler.confirm(job.id), true);
+    await until(() => store.job(job.id)?.status === 'completed' && !scheduler.isAccountBusy(account!.id));
+    assert.equal(store.jobs().filter(job => job.kind === 'playback').length, 0);
+    assert.equal(store.account(account!.id)?.courseUrl, 'https://91huayi.com/');
+  } finally { await scheduler.close(); store.close(); rmSync(directory, { recursive: true }); }
+});
+
+test('华医网目录任务正常调度，复用账号资料并保存章节，读取结束不启动播放', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'medcourse-huayi-list-'));
+  const store = new Store(':memory:');
+  const scheduler = new Scheduler(store, { dataDir: directory, maxConcurrency: 1, channel: 'chromium',
+    workerFactory: () => fork(fileURLToPath(new URL('./fixtures/worker.mjs', import.meta.url)), [], { execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }),
+  });
+  try {
+    const account = store.bindPlatforms(store.createUser('A').id, ['huayi'])[0]!;
+    const course = store.createCourse(account.id, '测试课程', 'https://cme28.91huayi.com/pages/course.aspx?cid=p');
+    const job = store.createJob(account.id, 'playlist', course.learningUrl, course.id);
+    scheduler.pump();
+    await until(() => store.job(job.id)?.status === 'completed');
+    assert.equal(store.account(account.id)?.loginState, 'saved');
+    assert.equal(store.courseJobs(course.id).filter(row => row.kind === 'playback').length, 1);
+    assert.equal(store.courseJobs(course.id).find(row => row.kind === 'playback')?.status, 'idle');
+    assert.equal(store.nextQueued(), undefined);
+    assert.equal(store.enqueueAll(account.id), 1);
+  } finally { await scheduler.close(); store.close(); rmSync(directory, { recursive: true }); }
+});
+
+test('华医网逐视频播放，待考试后继续下一节，跨课程串行且暂停保留队列和真实进度', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'medcourse-huayi-playback-'));
+  const store = new Store(':memory:');
+  const scheduler = new Scheduler(store, { dataDir: directory, maxConcurrency: 2, channel: 'chromium',
+    workerFactory: () => fork(fileURLToPath(new URL('./fixtures/worker.mjs', import.meta.url)), [], { execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }),
+  });
+  try {
+    const account = store.bindPlatforms(store.createUser('华医用户').id, ['huayi'])[0]!;
+    const course = store.createCourse(account.id, '华医课程', 'https://cme28.91huayi.com/pages/course.aspx?cid=a');
+    const other = store.createCourse(account.id, '另一门华医课程', 'https://cme28.91huayi.com/pages/course.aspx?cid=b');
+    store.importPlaylist(account.id, course.learningUrl, course.name, [
+      { chapterId: 'done', chapterTitle: '已学完', position: 1, durationText: '', platformStatus: '待考试' },
+      { chapterId: 'complete-exam', chapterTitle: '当前视频', position: 2, durationText: '', platformStatus: '学习中' },
+      { chapterId: 'next', chapterTitle: '下一视频', position: 3, durationText: '', platformStatus: '未学习' },
+      { chapterId: 'case', chapterTitle: '病例', position: 4, durationText: '', platformStatus: '未学习', excludedReason: '互动病例演练' },
+    ], course.id);
+    store.importPlaylist(account.id, other.learningUrl, other.name, [
+      { chapterId: 'other', chapterTitle: '其他课程视频', position: 1, durationText: '', platformStatus: '未学习' },
+    ], other.id);
+    assert.equal(store.enqueueAll(account.id), 3);
+    scheduler.pump();
+    const jobs = store.jobs();
+    const first = jobs.find(job => job.chapterId === 'complete-exam')!;
+    const next = jobs.find(job => job.chapterId === 'next')!;
+    const later = jobs.find(job => job.chapterId === 'other')!;
+    await until(() => store.job(first.id)?.status === 'completed' && store.job(next.id)?.currentTime === 12);
+    assert.equal(store.job(first.id)?.platformStatus, '待考试');
+    assert.equal(store.job(later.id)?.status, 'queued');
+    assert.equal(store.jobs().filter(job => job.status === 'running').length, 1, '增加并发也不能同时播放同账号两节视频');
+    assert.equal(await scheduler.pauseAccount(account.id), true);
+    assert.equal(store.job(next.id)?.status, 'paused');
+    assert.equal(store.job(next.id)?.currentTime, 12);
+    assert.equal(store.job(later.id)?.status, 'paused');
+    assert.equal(store.enqueueAll(account.id), 2, '继续只排未完成视频，排除病例和待考试');
+    scheduler.pump();
+    await until(() => store.job(next.id)?.status === 'running');
+    assert.equal(store.job(later.id)?.status, 'queued');
+  } finally { await scheduler.close(); store.close(); rmSync(directory, { recursive: true }); }
+});
+
+test('视频进程意外退出会暂停后续队列，不会跳过当前失败视频', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'medcourse-playback-crash-'));
+  const store = new Store(':memory:');
+  let worker: ChildProcess;
+  const scheduler = new Scheduler(store, { dataDir: directory, maxConcurrency: 2, channel: 'chromium',
+    workerFactory: () => worker = fork(fileURLToPath(new URL('./fixtures/worker.mjs', import.meta.url)), [], { execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }),
+  });
+  try {
+    const account = store.bindPlatforms(store.createUser('A').id, ['huayi'])[0]!;
+    const course = store.createCourse(account.id, '课程', 'https://cme28.91huayi.com/pages/course.aspx?cid=a');
+    store.importPlaylist(account.id, course.learningUrl, course.name, [1, 2].map(position => ({ chapterId: `v${position}`, chapterTitle: `视频${position}`, position, durationText: '', platformStatus: '未学习' })), course.id);
+    store.enqueueAll(account.id);
+    const first = store.jobs().find(job => job.chapterId === 'v1')!, next = store.jobs().find(job => job.chapterId === 'v2')!;
+    scheduler.pump();
+    await until(() => store.job(first.id)?.currentTime === 12);
+    worker!.kill('SIGKILL');
+    await until(() => store.job(first.id)?.status === 'failed');
+    assert.equal(store.job(first.id)?.currentTime, 12);
+    assert.equal(store.job(next.id)?.status, 'paused');
+    assert.equal(store.nextQueued(), undefined);
+    assert.equal(store.enqueueAll(account.id), 2);
+    assert.equal(store.nextQueued()?.id, first.id, '人工继续后从失败视频重试');
   } finally { await scheduler.close(); store.close(); rmSync(directory, { recursive: true }); }
 });

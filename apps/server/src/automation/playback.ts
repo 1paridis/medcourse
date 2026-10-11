@@ -41,7 +41,7 @@ export function isPlaybackVerification(message: string | null): boolean {
 }
 
 // 媒体事件可以提前触发采样。关闭页面会立即结束等待。
-export async function waitForPlaybackCheck(page: Page, timeoutMs: number, observeMedia: boolean): Promise<void> {
+export async function waitForPlaybackCheck(page: Pick<Page, 'evaluate'>, timeoutMs: number, observeMedia: boolean, selector = VIDEO_SELECTOR): Promise<void> {
   await page.evaluate(({ selector, timeoutMs, observeMedia }) => new Promise<void>(resolve => {
     // 对象方法避免开发运行器注入只能在 Node 中使用的函数命名辅助变量。
     const handlers = {
@@ -63,7 +63,7 @@ export async function waitForPlaybackCheck(page: Page, timeoutMs: number, observ
       const video = document.querySelector<HTMLVideoElement>(selector);
       if (video?.ended || video?.error) handlers.done();
     }
-  }), { selector: VIDEO_SELECTOR, timeoutMs, observeMedia });
+  }), { selector, timeoutMs, observeMedia });
 }
 
 type PlaybackObservation = Awaited<ReturnType<typeof readPlayback>>;

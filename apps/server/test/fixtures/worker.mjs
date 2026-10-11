@@ -1,7 +1,22 @@
 let kind;
 process.on('message', message => {
+  if (message.type === 'course_name') {
+    setTimeout(() => {
+      process.send({ type: 'course_name', requestId: message.requestId, name: '自动读取的课程名称' });
+      if (!kind) process.disconnect();
+    }, 80);
+    return;
+  }
   if (message.type === 'start') {
     kind = message.job.kind;
+    if (kind === 'playlist' && message.job.courseId) {
+      process.send({ type: 'playlist', courseUrl: message.job.url, courseTitle: '测试课程', items: [
+        { chapterId: 'v1', chapterTitle: '测试视频', position: 1, durationText: '10:00', platformStatus: '未学习' },
+      ] });
+      process.send({ type: 'done', status: 'completed', message: '列表读取完成' });
+      process.disconnect();
+      return;
+    }
     if (message.job.kind === 'playback') {
       process.send({ type: 'progress', progress: { currentTime: 12, duration: 100, playbackState: 'playing', platformStatus: '学习中', sampledAt: new Date().toISOString() } });
       if (message.job.chapterId === 'verify') process.send({ type: 'waiting_user', message: '等待人工打卡验证' });
