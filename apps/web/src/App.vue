@@ -197,7 +197,7 @@ onUnmounted(() => clearInterval(timer));
     </header>
     <main>
       <section class="intro">
-        <div><p class="eyebrow">你的课程工作台</p><h1>一个用户，多个学习网站。</h1><p class="subtitle">为每位用户选择网站，在各自的网站设置中管理多门课程。</p></div>
+        <div><p class="eyebrow">你的课程工作台</p><h1>Course</h1><p class="subtitle">为每位用户选择网站，在各自的网站设置中管理多门课程。</p></div>
         <el-button type="primary" size="large" @click="openUserDialog()">＋ 添加用户</el-button>
       </section>
       <el-alert v-if="connectionError" :title="connectionError" type="error" show-icon :closable="false" class="notice" />
@@ -219,8 +219,8 @@ onUnmounted(() => clearInterval(timer));
           <section v-if="!currentUser" class="section-card empty-state"><span class="empty-icon">＋</span><h3>添加第一位学习用户</h3><p>选择河南平台或华医网，再为每个网站添加课程。</p><el-button type="primary" @click="openUserDialog()">添加用户</el-button></section>
           <template v-else>
             <section class="section-card">
-              <div class="section-heading"><div><h2>{{ currentUser.name }} 的学习网站</h2><p>点击网站卡片，进入这位用户的网站设置。</p></div><div class="heading-actions"><el-button @click="openSites">管理学习网站</el-button><el-button text @click="openUserDialog(currentUser)">编辑用户</el-button><el-button text type="danger" @click="removeUser(currentUser)">移除用户</el-button></div></div>
-              <div v-if="!userAccounts.length" class="empty-state"><h3>尚未设置学习网站</h3><p>可以先选择网站，之后再添加课程。</p><el-button type="primary" @click="openSites">选择学习网站</el-button></div>
+              <div class="section-heading"><div><h2>{{ currentUser.name }} 的学习网站</h2><p>点击网站卡片，进入这位用户的网站设置。</p></div><div class="heading-actions"><el-button @click="openSites">管理网站</el-button><el-button text @click="openUserDialog(currentUser)">编辑用户</el-button><el-button text type="danger" @click="removeUser(currentUser)">移除用户</el-button></div></div>
+              <div v-if="!userAccounts.length" class="empty-state"><h3>尚未设置学习网站</h3><p>可以先选择网站，之后再添加课程。</p><el-button type="primary" @click="openSites">选择网站</el-button></div>
               <div v-else class="site-grid">
                 <button v-for="account in userAccounts" :key="account.id" class="site-card" :class="{ selected: account.id === accountId }" :aria-pressed="account.id === accountId" @click="selectAccount(account.id)">
                   <span class="site-card-heading"><strong>{{ platformName(account.platformId) }}</strong><span v-if="account.id === accountId" class="selected-mark">✓</span></span>
@@ -234,7 +234,7 @@ onUnmounted(() => clearInterval(timer));
                 <div class="section-heading"><div><h2>网站设置 · {{ currentUser.name }} / {{ currentPlatform.name }}</h2><p>这里的课程仅属于当前用户在这个网站的账号。</p></div><el-button text type="danger" :disabled="accountBusy(currentAccount.id)" @click="removeAccount(currentAccount)">移除网站</el-button></div>
                 <div v-if="currentPlatform.capabilities.login" class="website-controls">
                   <span class="form-hint">{{ currentAccount.loginState === 'saved' ? '本站所有课程共用已保存的登录资料，是否有效以实际读取结果为准。' : '请通过登录本站完成人工登录，成功后自动记录，本站所有课程共用。' }}</span>
-                  <div class="account-actions"><el-button :disabled="accountBusy(currentAccount.id)" @click="start(currentAccount, 'login')">登录本站</el-button><el-button v-if="currentPlatform.capabilities.execution" type="primary" :disabled="!canStartAll(currentAccount)" @click="startAll(currentAccount)">开始本站学习</el-button><el-button v-if="currentPlatform.capabilities.execution" :disabled="!canPauseAll(currentAccount.id)" @click="pauseAll(currentAccount)">暂停本站学习</el-button></div>
+                  <div class="account-actions"><el-button :disabled="accountBusy(currentAccount.id)" @click="start(currentAccount, 'login')">登录</el-button><el-button v-if="currentPlatform.capabilities.execution" type="primary" :disabled="!canStartAll(currentAccount)" @click="startAll(currentAccount)">开始学习</el-button><el-button v-if="currentPlatform.capabilities.execution" :disabled="!canPauseAll(currentAccount.id)" @click="pauseAll(currentAccount)">暂停</el-button></div>
                   <el-alert v-if="needsAttention(currentAccount.id)" title="有视频需要人工处理。请先暂停，再通过网站设置的“登录本站”处理验证，登录状态自动记录，关闭窗口后继续本站学习。" type="warning" :closable="false" />
                 </div>
                 <el-alert v-if="currentPlatform.capabilities.execution" :title="'按课程添加顺序学习，每门课程内按视频顺序逐个播放，学完一门再学下一门。' + (currentAccount.platformId === 'huayi' ? '待考试表示视频已学完；互动病例演练已排除，考试和身份验证需人工完成。' : '已学完的视频自动跳过，平台验证需人工完成。')" type="info" :closable="false" class="notice" />

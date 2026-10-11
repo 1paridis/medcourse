@@ -1,0 +1,105 @@
+{
+  "courseTitle": "基于证据的妇科中西医协同治疗",
+  "courseUrl": "https://cme28.91huayi.com/pages/course.aspx?cid=433235f5-6cf7-4da3-9000-8760b6c4a1d7",
+  "readAt": "2026-10-11T06:20:39.161884+00:00",
+  "scope": "只读课程列表；不播放，不进入互动病例演练，不操作考试",
+  "platformCourseProgress": "0/11",
+  "chapters": [
+    {
+      "position": 1,
+      "title": "妇科盆腔炎性疾病的中医诊治",
+      "progressPercent": 100,
+      "platformStatus": "待考试",
+      "excluded": false,
+      "handling": "学习已完成，考试暂不处理"
+    },
+    {
+      "position": 2,
+      "title": "从中医论治卵巢功能减退",
+      "progressPercent": 49,
+      "platformStatus": "学习中",
+      "excluded": false,
+      "handling": "保留平台进度，本次不播放"
+    },
+    {
+      "position": 3,
+      "title": "中国绝经管理与绝经激素治疗指南2023版解读",
+      "progressPercent": 0,
+      "platformStatus": "未学习",
+      "excluded": false,
+      "handling": "保留平台进度，本次不播放"
+    },
+    {
+      "position": 4,
+      "title": "多囊卵巢综合征（PCOS）的中医药诊治",
+      "progressPercent": 0,
+      "platformStatus": "未学习",
+      "excluded": false,
+      "handling": "保留平台进度，本次不播放"
+    },
+    {
+      "position": 5,
+      "title": "卵巢储备功能减退中医诊治特点",
+      "progressPercent": 0,
+      "platformStatus": "未学习",
+      "excluded": false,
+      "handling": "保留平台进度，本次不播放"
+    },
+    {
+      "position": 6,
+      "title": "绝经健康管理及绝经激素治疗",
+      "progressPercent": 0,
+      "platformStatus": "未学习",
+      "excluded": false,
+      "handling": "保留平台进度，本次不播放"
+    },
+    {
+      "position": 7,
+      "title": "营养干预与流产预防",
+      "progressPercent": 0,
+      "platformStatus": "未学习",
+      "excluded": false,
+      "handling": "保留平台进度，本次不播放"
+    },
+    {
+      "position": 8,
+      "title": "绝经骨质疏松防治的要点及难点",
+      "progressPercent": 0,
+      "platformStatus": "未学习",
+      "excluded": false,
+      "handling": "保留平台进度，本次不播放"
+    },
+    {
+      "position": 9,
+      "title": "阴道微生态平衡在绝经生殖泌尿综合征诊治中的重要性",
+      "progressPercent": 0,
+      "platformStatus": "未学习",
+      "excluded": false,
+      "handling": "保留平台进度，本次不播放"
+    },
+    {
+      "position": 10,
+      "title": "更年期综合征诊治的难点及对策",
+      "progressPercent": 0,
+      "platformStatus": "未学习",
+      "excluded": false,
+      "handling": "保留平台进度，本次不播放"
+    },
+    {
+      "position": 11,
+      "title": "不孕症诊断指南解读",
+      "progressPercent": 0,
+      "platformStatus": "未学习",
+      "excluded": false,
+      "handling": "保留平台进度，本次不播放"
+    },
+    {
+      "position": 12,
+      "title": "失眠2年，情绪不稳，背后隐藏了什么？",
+      "progressPercent": 0,
+      "platformStatus": "未学习",
+      "excluded": true,
+      "handling": "排除：互动病例演练"
+    }
+  ]
+}
