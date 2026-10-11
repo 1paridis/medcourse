@@ -51,6 +51,7 @@ export class Scheduler {
       const name = await new Promise<string>((resolve, reject) => {
         const cleanup = () => { clearTimeout(timer); child.off('message', onMessage); child.off('close', onClose); child.off('error', onError); };
         const onMessage = (event: WorkerEvent) => {
+          if (event?.type === 'login_saved' && !existing) this.store.saveLogin(accountId, event.courseUrl);
           if (event?.type !== 'course_name' || event.requestId !== requestId) return;
           cleanup();
           if (event.error || !event.name?.trim()) reject(new StoreError(event.error || '网页未提供课程名称，未添加课程', 422));
@@ -99,6 +100,11 @@ export class Scheduler {
         if (!event || typeof event !== 'object') return;
         if (event.type === 'log') this.store.log(job.id, event.level, event.message);
         if (event.type === 'waiting_user') this.store.updateJob(job.id, 'waiting_user', event.message);
+        if (event.type === 'login_saved' && job.kind === 'login') {
+          this.store.saveLogin(job.accountId, event.courseUrl);
+          this.store.updateJob(job.id, 'waiting_user', event.message);
+          this.store.log(job.id, 'info', event.message);
+        }
         if (event.type === 'playback_resumed' && job.kind === 'playback' && this.store.job(job.id)?.status === 'waiting_user') {
           this.store.updateJob(job.id, 'running', event.message);
           this.store.log(job.id, 'info', event.message);

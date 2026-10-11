@@ -22,9 +22,10 @@ test('课程名称读取复用登录子进程和账号会话，独立读取受�
   const directory = mkdtempSync(join(tmpdir(), 'medcourse-name-'));
   const store = new Store(':memory:');
   let workers = 0;
+  let worker: ChildProcess;
   const scheduler = new Scheduler(store, { dataDir: directory, maxConcurrency: 1, channel: 'chromium', workerFactory: () => {
     workers++;
-    return fork(fileURLToPath(new URL('./fixtures/worker.mjs', import.meta.url)), [], { execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+    return worker = fork(fileURLToPath(new URL('./fixtures/worker.mjs', import.meta.url)), [], { execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
   } });
   const user = store.createUser('A');
   const [account] = store.bindPlatforms(user.id, ['huayi']);
@@ -44,17 +45,21 @@ test('课程名称读取复用登录子进程和账号会话，独立读取受�
     assert.equal(await scheduler.readCourseName(account!.id, url), '自动读取的课程名称');
     assert.equal(workers, before);
     assert.equal(store.job(login.id)?.status, 'waiting_user');
-    assert.equal(scheduler.confirm(login.id), true);
+    worker!.send({ type: 'test_authenticated' });
+    await until(() => store.account(account!.id)?.loginState === 'saved');
+    assert.equal(store.job(login.id)?.status, 'waiting_user', '自动记录不会关闭供人工验证使用的窗口');
+    worker!.send({ type: 'test_close' });
     await until(() => store.job(login.id)?.status === 'completed');
   } finally { await scheduler.close(); store.close(); rmSync(directory, { recursive: true }); }
 });
 
-test('子进程调度遵守并发上限，停止后启动队列下一项，并保存人工确认', async () => {
+test('子进程调度遵守并发上限，登录成功自动记录，关闭窗口后释放账号', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'medcourse-scheduler-'));
   const store = new Store(':memory:');
+  let worker: ChildProcess;
   const scheduler = new Scheduler(store, {
     dataDir: directory, maxConcurrency: 1, channel: 'chromium',
-    workerFactory: () => fork(fileURLToPath(new URL('./fixtures/worker.mjs', import.meta.url)), [], { execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }),
+    workerFactory: () => worker = fork(fileURLToPath(new URL('./fixtures/worker.mjs', import.meta.url)), [], { execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }),
   });
   const a = store.createAccount('A', PLATFORM_ORIGIN);
   const b = store.createAccount('B', PLATFORM_ORIGIN);
@@ -67,7 +72,10 @@ test('子进程调度遵守并发上限，停止后启动队列下一项，并�
     assert.equal(scheduler.isAccountBusy(a.id), true);
     assert.equal(await scheduler.stop(first.id), true);
     await until(() => store.job(second.id)?.status === 'waiting_user');
-    assert.equal(scheduler.confirm(second.id), true);
+    worker!.send({ type: 'test_authenticated' });
+    await until(() => store.account(b.id)?.loginState === 'saved');
+    assert.equal(store.job(second.id)?.status, 'waiting_user');
+    worker!.send({ type: 'test_close' });
     await until(() => store.job(second.id)?.status === 'completed');
     assert.equal(store.account(b.id)?.loginState, 'saved');
     assert.equal(store.job(first.id)?.status, 'stopped');
@@ -230,12 +238,13 @@ test('移除正在运行的课程先阻止后续章节启动，保留进度，�
 });
 
 
-test('华医网首页登录任务正常调度、确认和释放账号，不生成视频任务', async () => {
+test('华医网首页登录成功后自动记录，关闭窗口释放账号，不生成视频任务', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'medcourse-huayi-login-'));
   const store = new Store(':memory:');
+  let worker: ChildProcess;
   const scheduler = new Scheduler(store, {
     dataDir: directory, maxConcurrency: 1, channel: 'chromium',
-    workerFactory: () => fork(fileURLToPath(new URL('./fixtures/worker.mjs', import.meta.url)), [], { execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }),
+    workerFactory: () => worker = fork(fileURLToPath(new URL('./fixtures/worker.mjs', import.meta.url)), [], { execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] }),
   });
   const user = store.createUser('A');
   const [account] = store.bindPlatforms(user.id, ['huayi']);
@@ -243,7 +252,12 @@ test('华医网首页登录任务正常调度、确认和释放账号，不生�
   try {
     scheduler.pump();
     await until(() => store.job(job.id)?.status === 'waiting_user');
-    assert.equal(scheduler.confirm(job.id), true);
+    assert.equal(store.account(account!.id)?.loginState, 'none', '打开首页不代表登录成功');
+    worker!.send({ type: 'test_authenticated' });
+    await until(() => store.account(account!.id)?.loginState === 'saved');
+    assert.equal(store.job(job.id)?.status, 'waiting_user');
+    assert.equal(scheduler.isAccountBusy(account!.id), true, '窗口保留期间不启动后台任务');
+    worker!.send({ type: 'test_close' });
     await until(() => store.job(job.id)?.status === 'completed' && !scheduler.isAccountBusy(account!.id));
     assert.equal(store.jobs().filter(job => job.kind === 'playback').length, 0);
     assert.equal(store.account(account!.id)?.courseUrl, 'https://91huayi.com/');

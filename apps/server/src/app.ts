@@ -122,7 +122,7 @@ export async function createApp(options: {
     const defaultUrl = request.body.kind === 'login' ? platformById(account.platformId)!.entryUrl : account.courseUrl;
     const url = course?.learningUrl || request.body.url?.trim() || defaultUrl;
     if (!(account.platformId === 'huayi' ? (request.body.kind === 'login' ? url === platformById('huayi')!.entryUrl : !!course && isHuayiCourseUrl(url)) : isPlatformUrl(url))) return reply.code(400).send({ message: '任务地址必须属于目标平台' });
-    if (request.body.kind === 'playlist' && account.platformId === 'henan' && (!courseUrl(url) || account.loginState !== 'saved')) return reply.code(400).send({ message: '请先保存登录并进入目标课程播放页' });
+    if (request.body.kind === 'playlist' && account.platformId === 'henan' && (!courseUrl(url) || account.loginState !== 'saved')) return reply.code(400).send({ message: '请先完成人工登录，状态会自动记录，再进入目标课程播放页' });
     if (scheduler.isAccountBusy(account.id)) return reply.code(409).send({ message: '该账号已有任务，不能同时登录或检查' });
     const job = store.createJob(account.id, request.body.kind, url, course?.id);
     store.log(job.id, 'info', request.body.kind === 'login' ? '人工登录任务已创建' : request.body.kind === 'playlist' ? '播放列表读取任务已创建' : '无头页面检查任务已创建');
@@ -135,7 +135,7 @@ export async function createApp(options: {
     const account = store.account(request.params.id);
     if (!account) return reply.code(404).send({ message: '账号不存在' });
     if (!store.canExecute(account.id)) return reply.code(409).send({ message: '该网站学习功能尚未接入' });
-    if (account.loginState !== 'saved') return reply.code(409).send({ message: '请先完成并保存人工登录' });
+    if (account.loginState !== 'saved') return reply.code(409).send({ message: '请先完成人工登录，登录成功后会自动记录' });
     if (scheduler.isAccountBusy(account.id)) return reply.code(409).send({ message: '账号正在运行或排队，请先暂停后再开始' });
     const queued = store.enqueueAll(account.id);
     if (!queued) return reply.code(409).send({ message: '没有可排队的视频任务，或账号正在登录、读取列表或检查页面' });
@@ -154,7 +154,7 @@ export async function createApp(options: {
     const job = store.job(request.params.id);
     if (!job) return reply.code(404).send({ message: '任务不存在' });
     if (!store.canExecute(job.accountId, job.courseId)) return reply.code(409).send({ message: '该网站学习功能尚未接入，或课程已移除' });
-    if (store.account(job.accountId)?.loginState !== 'saved') return reply.code(409).send({ message: '请先完成并保存人工登录' });
+    if (store.account(job.accountId)?.loginState !== 'saved') return reply.code(409).send({ message: '请先完成人工登录，登录成功后会自动记录' });
     if (!store.enqueue(job.id)) return reply.code(409).send({ message: '视频任务当前不可启动，或账号正在进行登录、读取或检查' });
     store.log(job.id, 'info', '视频已排队，从平台当前进度播放，不根据本地记录跳转视频时间');
     scheduler.pump();

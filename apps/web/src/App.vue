@@ -177,7 +177,6 @@ function start(account: Account, kind: JobKind, course?: Course) {
 }
 function startAll(account: Account) { void action(account.id, async () => { const result = await api<{ queued: number }>(`/accounts/${account.id}/start-all`, { method: 'POST' }); ElMessage.success(`${result.queued} 个视频按顺序排队`); }); }
 function pauseAll(account: Account) { void action(account.id, async () => { await api(`/accounts/${account.id}/pause-all`, { method: 'POST' }); ElMessage.success('本站播放已暂停，进度已保存'); }); }
-function confirm(job: Job) { void action(job.id, () => api(`/jobs/${job.id}/confirm`, { method: 'POST' })); }
 function stop(job: Job) { void action(job.id, () => api(`/jobs/${job.id}/stop`, { method: 'POST' })); }
 async function openLogs(job: Job) { selectedJob.value = job; logs.value = []; await refresh(); }
 function formatTime(value: string) { return new Date(value).toLocaleString('zh-CN', { hour12: false }); }
@@ -235,9 +234,9 @@ onUnmounted(() => clearInterval(timer));
               <section class="section-card">
                 <div class="section-heading"><div><h2>网站设置 · {{ currentUser.name }} / {{ currentPlatform.name }}</h2><p>这里的课程仅属于当前用户在这个网站的账号。</p></div><el-button text type="danger" :disabled="accountBusy(currentAccount.id)" @click="removeAccount(currentAccount)">移除网站</el-button></div>
                 <div v-if="currentPlatform.capabilities.login" class="website-controls">
-                  <span class="form-hint">{{ currentAccount.loginState === 'saved' ? '本站所有课程共用已保存的登录资料，是否有效以实际读取结果为准。' : '本站所有课程共用一份登录资料，请通过登录本站完成人工登录。' }}</span>
+                  <span class="form-hint">{{ currentAccount.loginState === 'saved' ? '本站所有课程共用已保存的登录资料，是否有效以实际读取结果为准。' : '请通过登录本站完成人工登录，成功后自动记录，本站所有课程共用。' }}</span>
                   <div class="account-actions"><el-button :disabled="accountBusy(currentAccount.id)" @click="start(currentAccount, 'login')">登录本站</el-button><el-button v-if="currentPlatform.capabilities.execution" type="primary" :disabled="!canStartAll(currentAccount)" @click="startAll(currentAccount)">开始本站学习</el-button><el-button v-if="currentPlatform.capabilities.execution" :disabled="!canPauseAll(currentAccount.id)" @click="pauseAll(currentAccount)">暂停本站学习</el-button></div>
-                  <el-alert v-if="needsAttention(currentAccount.id)" title="有视频需要人工处理。请先暂停，再通过网站设置的“登录本站”处理验证，保存登录后继续本站学习。" type="warning" :closable="false" />
+                  <el-alert v-if="needsAttention(currentAccount.id)" title="有视频需要人工处理。请先暂停，再通过网站设置的“登录本站”处理验证，登录状态自动记录，关闭窗口后继续本站学习。" type="warning" :closable="false" />
                 </div>
                 <el-alert v-if="currentAccount.platformId === 'huayi'" title="按顺序逐个播放未完成视频，待考试表示视频已学完；互动病例演练已排除，考试和身份验证需人工完成。" type="info" :closable="false" class="notice" />
                 <div class="section-heading course-heading"><h2>我的课程 <span class="count-badge">{{ courseCount(currentAccount.id) }}</span></h2><div class="heading-actions"><el-checkbox v-model="showArchived">显示已移除课程</el-checkbox><el-button type="primary" @click="openCourseDialog()">＋ 添加课程</el-button></div></div>
@@ -263,13 +262,13 @@ onUnmounted(() => clearInterval(timer));
       </section>
 
       <section class="section-card" v-if="currentPlatform?.capabilities.login">
-        <div class="section-heading"><div><h2>任务记录</h2><p>人工登录完成后，点击“保存本站登录”，本站所有课程共用登录资料。</p></div><el-button text @click="refresh()">刷新</el-button></div>
+        <div class="section-heading"><div><h2>任务记录</h2><p>登录成功后自动记录，完成验证后关闭登录窗口即可，本站所有课程共用登录资料。</p></div><el-button text @click="refresh()">刷新</el-button></div>
         <el-table :data="serviceJobs" empty-text="还没有任务，可先登录本站。" style="width: 100%">
           <el-table-column label="用户 / 网站" min-width="120"><template #default="{ row }">{{ accountLabel(row.accountId) }}</template></el-table-column>
           <el-table-column label="任务" width="125"><template #default="{ row }">{{ kindLabels[row.kind as JobKind] }}</template></el-table-column>
-          <el-table-column label="状态" width="140"><template #default="{ row }"><el-tag :type="row.status === 'failed' ? 'danger' : row.status === 'waiting_user' ? 'warning' : 'info'" effect="light">{{ labels[row.status as JobStatus] }}</el-tag></template></el-table-column>
+          <el-table-column label="状态" width="140"><template #default="{ row }"><el-tag :type="row.status === 'failed' ? 'danger' : row.status === 'waiting_user' ? 'warning' : 'info'" effect="light">{{ row.kind === 'login' && row.status === 'waiting_user' && row.detail.startsWith('登录状态已自动记录') ? '登录已自动记录' : labels[row.status as JobStatus] }}</el-tag></template></el-table-column>
           <el-table-column prop="detail" label="说明" min-width="240" show-overflow-tooltip />
-          <el-table-column label="操作" width="240"><template #default="{ row }"><el-button v-if="row.kind === 'login' && row.status === 'waiting_user'" link type="primary" :loading="busy.has(row.id)" @click="confirm(row)">保存本站登录</el-button><el-button v-if="ACTIVE_JOB_STATUSES.includes(row.status)" link type="danger" :loading="busy.has(row.id)" @click="stop(row)">停止</el-button><el-button link @click="openLogs(row)">日志</el-button></template></el-table-column>
+          <el-table-column label="操作" width="240"><template #default="{ row }"><el-button v-if="ACTIVE_JOB_STATUSES.includes(row.status)" link type="danger" :loading="busy.has(row.id)" @click="stop(row)">停止</el-button><el-button link @click="openLogs(row)">日志</el-button></template></el-table-column>
         </el-table>
       </section>
 

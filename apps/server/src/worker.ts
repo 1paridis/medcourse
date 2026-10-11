@@ -1,5 +1,3 @@
-import { writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, type BrowserContext, type Page } from 'playwright';
@@ -9,13 +7,19 @@ import { isPlaybackVerification, monitorPlayback, runPlaybackWithRestarts, Verif
 import { isHuayiCourseUrl, readHuayiPlaylist } from './automation/huayi.js';
 import { HuayiPlayer, openHuayiVideo } from './automation/huayi-playback.js';
 import { isRequestedCoursePage, readCourseName, restoreAccountSession, saveHuayiSession } from './automation/course-name.js';
+import { findAuthenticatedPage, LoginRecorder, saveLoginSession } from './automation/login.js';
 
 let context: BrowserContext | undefined;
 let command: Extract<WorkerCommand, { type: 'start' }> | undefined;
 let playbackPage: Page | undefined;
 let huayiPlayer: HuayiPlayer | undefined;
 let finished = false;
-let waiting = false;
+let loginSaved = false;
+let browserClosed = false;
+let loginRefresh: Promise<void> | undefined;
+let loginRecorder: LoginRecorder | undefined;
+let savedCourseUrl: string | undefined;
+let loginSaveError = false;
 const namePages = new Map<string, { page: Page; createdPage: boolean }>();
 const verificationRestarts = new VerificationRestartBudget();
 let pendingRestart: { id: string; attempt: number; progress: PlaybackProgress; baseline: number | null } | undefined;
@@ -47,6 +51,7 @@ async function pausePlayback(page: Page): Promise<void> {
 async function finish(status: 'completed' | 'failed' | 'stopped' | 'paused' | 'needs_attention', message: string, selectedCourseUrl?: string): Promise<void> {
   if (finished) return;
   finished = true;
+  await loginRefresh?.catch(() => {});
   if (pendingRestart) {
     logVerification('restart_interrupted', { attempt: pendingRestart.attempt, status, reason: message });
     pendingRestart = undefined;
@@ -55,8 +60,13 @@ async function finish(status: 'completed' | 'failed' | 'stopped' | 'paused' | 'n
     await pausePlayback(playbackPage).catch(() => {});
     await snapshot().catch(() => {});
   }
-  if (context && command?.platformId === 'huayi') await saveHuayiSession(context, command.profileDir).catch(() => {
-    send({ type: 'log', level: 'error', message: '华医网会话保存失败，请重新登录并保存本站登录' });
+  if (context && !browserClosed && command?.job.kind === 'login' && loginSaved) {
+    const page = await findAuthenticatedPage(context, command.platformId ?? 'henan');
+    if (page) await saveLoginSession(context, page, command.profileDir, command.platformId ?? 'henan').catch(() => {
+      send({ type: 'log', level: 'error', message: '最新登录状态未能自动记录，请重新登录' });
+    });
+  } else if (context && !browserClosed && command?.platformId === 'huayi' && command.job.kind !== 'login') await saveHuayiSession(context, command.profileDir).catch(() => {
+    send({ type: 'log', level: 'error', message: '华医网会话保存失败，请重新登录' });
   });
   await context?.close().catch(() => {});
   send({ type: 'done', status, message, courseUrl: selectedCourseUrl });
@@ -165,7 +175,7 @@ async function play(page: Page): Promise<'restart' | void> {
         send({ type: 'log', level: 'info', message: `检测到打卡提示，保存实际进度后暂停并重新启动当前视频（1 分钟内第 ${attempt}/${VERIFICATION_RESTART_MAX_ATTEMPTS} 次）` });
         return 'restart';
       }
-      const detail = checkin && !huayiPlayer ? VERIFICATION_RETRY_LIMIT_MESSAGE : '请先暂停本站学习，再通过“登录本站”完成验证，保存登录后点击“开始本站学习”';
+      const detail = checkin && !huayiPlayer ? VERIFICATION_RETRY_LIMIT_MESSAGE : '请先暂停本站学习，再通过“登录本站”完成验证；登录状态自动记录，关闭窗口后点击“开始本站学习”';
       if (checkin && !huayiPlayer) logVerification('restart_limit_reached', { verificationId, progress,
         windowMs: VERIFICATION_RESTART_WINDOW_MS, maxAttempts: VERIFICATION_RESTART_MAX_ATTEMPTS });
       send({ type: 'waiting_user', message: `${message}；${detail}` });
@@ -188,12 +198,18 @@ async function openPage(input: Extract<WorkerCommand, { type: 'start' }>): Promi
   });
   if (finished) { await context.close(); return; }
   const openedContext = context;
-  context.on('close', () => { if (context === openedContext) void finish('stopped', '浏览器窗口已关闭'); });
+  browserClosed = false;
+  context.on('close', () => {
+    if (context !== openedContext) return;
+    browserClosed = true;
+    void finish(input.job.kind === 'login' && loginSaved ? 'completed' : 'stopped',
+      input.job.kind === 'login' && loginSaved ? '登录状态已自动记录，浏览器窗口已关闭' : '浏览器窗口已关闭，未确认新的登录状态', savedCourseUrl);
+  });
   context.setDefaultTimeout(15_000);
   try { await restoreAccountSession(context, input.profileDir, input.platformId ?? 'henan'); }
   catch (error) {
     if (input.job.kind !== 'login') throw error;
-    send({ type: 'log', level: 'info', message: '已有会话文件无法读取，请在当前窗口重新登录并保存本站登录' });
+    send({ type: 'log', level: 'info', message: '已有会话文件无法读取，请在当前窗口重新登录；成功后会自动记录' });
   }
   if (input.job.kind === 'playlist' || input.job.kind === 'inspect') {
     await context.addInitScript(() => document.addEventListener('play', event => {
@@ -221,8 +237,23 @@ async function start(input: Extract<WorkerCommand, { type: 'start' }>): Promise<
   const page = await openPage(input);
   if (!page || finished) return;
   if (input.job.kind === 'login') {
-    waiting = true;
-    send({ type: 'waiting_user', message: '请在网站首页人工登录，完成后点击“保存本站登录”。本站所有课程共用这份登录资料。' });
+    send({ type: 'waiting_user', message: '请在网站窗口人工登录，登录成功后自动记录；完成验证后关闭窗口即可。本站所有课程共用登录资料。' });
+    loginRecorder = new LoginRecorder({
+      find: () => findAuthenticatedPage(context!, input.platformId ?? 'henan'),
+      save: async page => {
+        const selectedUrl = await saveLoginSession(context!, page, input.profileDir, input.platformId ?? 'henan');
+        if (finished) return;
+        if (!loginSaved || selectedUrl !== savedCourseUrl) {
+          send({ type: 'login_saved', message: '登录状态已自动记录，无需手动保存；可继续处理课程验证，完成后关闭窗口即可', courseUrl: selectedUrl });
+        }
+        loginSaved = true;
+        savedCourseUrl = selectedUrl;
+      },
+    });
+    while (!finished) {
+      await refreshLogin();
+      if (!finished) await delay(1000);
+    }
     return;
   }
   if (input.job.kind === 'playlist') {
@@ -262,24 +293,14 @@ async function start(input: Extract<WorkerCommand, { type: 'start' }>): Promise<
   await finish('completed', message);
 }
 
-async function confirm(): Promise<void> {
-  if (!waiting || !context || !command || finished) return;
-  waiting = false;
-  if (command.platformId === 'huayi') {
-    await saveHuayiSession(context, command.profileDir);
-    await finish('completed', '本站登录会话已保存，所有课程共用；可读取视频列表并开始本站学习');
-    return;
-  }
-  const page = context.pages().filter(page => isPlatformUrl(page.url())).at(-1);
-  if (!page) throw new Error('没有找到平台页面，请重新打开登录窗口');
-  if ((await inspectPage(page)).loginFormVisible) {
-    waiting = true;
-    send({ type: 'waiting_user', message: '页面仍显示登录表单，请完成登录后再保存' });
-    return;
-  }
-  const storage = await page.evaluate(() => Object.fromEntries(Object.entries(sessionStorage)));
-  await writeFile(join(command.profileDir, '_sessionStorage.json'), JSON.stringify(storage), { mode: 0o600 });
-  await finish('completed', '浏览器登录状态已保存；可读取播放列表或检查课程页面', page.url());
+async function refreshLogin(): Promise<void> {
+  if (!loginRecorder || finished || browserClosed) return;
+  if (loginRefresh) return loginRefresh;
+  loginRefresh = loginRecorder.check().then(() => { loginSaveError = false; }).catch(() => {
+    if (!finished && !browserClosed && !loginSaveError) send({ type: 'log', level: 'error', message: '登录状态暂未能自动记录，将继续重试；请保持窗口打开' });
+    loginSaveError = true;
+  });
+  try { await loginRefresh; } finally { loginRefresh = undefined; }
 }
 
 async function extractCourseName(input: Extract<WorkerCommand, { type: 'course_name' }>): Promise<void> {
@@ -309,7 +330,14 @@ async function extractCourseName(input: Extract<WorkerCommand, { type: 'course_n
     }
     namePages.set(input.requestId, { page, createdPage });
     result = { name: await readCourseName(page, input.platformId, input.url) };
-    if (input.platformId === 'huayi') await saveHuayiSession(context, input.profileDir);
+    const authenticated = await findAuthenticatedPage(context, input.platformId);
+    if (authenticated) {
+      const selectedUrl = await saveLoginSession(context, authenticated, input.profileDir, input.platformId);
+      if (owned || !loginSaved || selectedUrl !== savedCourseUrl) {
+        send({ type: 'login_saved', message: '登录状态已自动记录', courseUrl: selectedUrl });
+      }
+      if (!owned) { loginSaved = true; savedCourseUrl = selectedUrl; }
+    }
   } catch (error) {
     // Playwright 错误可能含完整鉴权 URL，只返回可操作的中文提示。
     result = { error: error instanceof Error && !/https?:|Call log:|browserType\.|page\./.test(error.message)
@@ -330,7 +358,7 @@ process.on('message', (input: WorkerCommand) => {
     if (reader?.createdPage) void reader.page.close().catch(() => {});
     return;
   }
-  const action = input.type === 'start' ? start(input) : input.type === 'confirm' ? confirm()
+  const action = input.type === 'start' ? start(input) : input.type === 'confirm' ? refreshLogin()
     : input.type === 'pause' ? finish('paused', '已暂停，实际视频进度已保存') : finish('stopped', '任务已停止，进度已保留');
   void action.catch(error => {
     const text = error instanceof Error ? error.message : '未知错误';

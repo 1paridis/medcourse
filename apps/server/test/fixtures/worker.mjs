@@ -1,4 +1,5 @@
 let kind;
+let loginSaved = false;
 process.on('message', message => {
   if (message.type === 'course_name') {
     setTimeout(() => {
@@ -25,7 +26,17 @@ process.on('message', message => {
         process.send({ type: 'done', status: 'completed', message: '视频学习结束，待考试；继续下一视频' });
         process.disconnect();
       }
-    } else process.send({ type: 'waiting_user', message: '等待测试确认' });
+    } else process.send({ type: 'waiting_user', message: '等待平台登录成功，状态自动记录' });
+  }
+  if (message.type === 'test_authenticated' && kind === 'login') {
+    loginSaved = true;
+    process.send({ type: 'login_saved', message: '登录状态已自动记录' });
+    return;
+  }
+  if (message.type === 'test_close' && kind === 'login') {
+    process.send({ type: 'done', status: loginSaved ? 'completed' : 'stopped', message: '登录窗口已关闭' });
+    process.disconnect();
+    return;
   }
   if (message.type === 'confirm' && kind === 'playback') {
     process.send({ type: 'playback_resumed', message: '验证完成，继续播放' });
