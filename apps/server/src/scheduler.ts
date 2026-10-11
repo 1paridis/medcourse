@@ -122,7 +122,8 @@ export class Scheduler {
         }
         if (event.type === 'done' && this.store.job(job.id)?.status !== 'failed') {
           this.store.updateJob(job.id, event.status, event.message);
-          if (job.kind === 'playback' && ['needs_attention', 'paused', 'failed'].includes(event.status)) this.store.pauseQueuedAccount(job.accountId);
+          if (job.kind === 'playback' && (['needs_attention', 'paused', 'failed'].includes(event.status)
+            || (event.status === 'stopped' && !this.pausingAccounts.has(job.accountId)))) this.store.pauseQueuedAccount(job.accountId);
           this.store.log(job.id, event.status === 'failed' ? 'error' : 'info', event.message);
           if (job.kind === 'login' && event.status === 'completed') this.store.saveLogin(job.accountId, event.courseUrl);
         }
@@ -206,6 +207,7 @@ export class Scheduler {
     if (!job || !['queued', 'running', 'waiting_user'].includes(job.status)) return false;
     const running = this.running.get(id);
     if (!running) {
+      if (job.kind === 'playback' && !this.pausingAccounts.has(job.accountId)) this.store.pauseQueuedAccount(job.accountId);
       this.store.updateJob(id, 'stopped', '任务已取消');
       return true;
     }

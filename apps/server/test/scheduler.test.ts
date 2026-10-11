@@ -348,3 +348,45 @@ test('视频进程意外退出会暂停后续队列，不会跳过当前失败�
     assert.equal(store.nextQueued()?.id, first.id, '人工继续后从失败视频重试');
   } finally { await scheduler.close(); store.close(); rmSync(directory, { recursive: true }); }
 });
+
+test('多门课程完整调度：当前课程逐视频完成后才换课，停止后继续原视频', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'medcourse-course-sequence-'));
+  const store = new Store(':memory:');
+  const workers: ChildProcess[] = [];
+  const scheduler = new Scheduler(store, { dataDir: directory, maxConcurrency: 3, channel: 'chromium',
+    workerFactory: () => {
+      const child = fork(fileURLToPath(new URL('./fixtures/worker.mjs', import.meta.url)), [], { execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+      workers.push(child);
+      return child;
+    },
+  });
+  try {
+    const account = store.bindPlatforms(store.createUser('A').id, ['huayi'])[0]!;
+    const courses = ['z', 'a'].map(name => store.createCourse(account.id, name, `https://cme28.91huayi.com/pages/course.aspx?cid=${name}`));
+    for (const course of [...courses].reverse()) store.importPlaylist(account.id, course.learningUrl, course.name,
+      [3, 1, 2].map(position => ({ chapterId: `${course.name}-${position}`, chapterTitle: `视频${position}`, position, durationText: '', platformStatus: '未学习' })), course.id);
+    store.enqueueAll(account.id);
+    scheduler.pump();
+    for (const chapter of ['z-1', 'z-2', 'z-3', 'a-1', 'a-2', 'a-3']) {
+      await until(() => store.jobs().some(job => job.chapterId === chapter && job.status === 'running' && job.currentTime === 12));
+      const current = store.jobs().find(job => job.chapterId === chapter)!;
+      assert.equal(store.jobs().filter(job => job.status === 'running').length, 1);
+      if (chapter.startsWith('z-')) assert.ok(store.courseJobs(courses[1]!.id).every(job => job.status === 'queued'));
+      if (chapter === 'z-2') {
+        await scheduler.stop(current.id);
+        assert.equal(store.job(current.id)?.status, 'stopped');
+        assert.equal(store.job(current.id)?.currentTime, 12);
+        assert.equal(store.nextQueued(), undefined);
+        assert.ok(store.courseJobs(courses[1]!.id).every(job => job.status === 'paused'));
+        store.enqueueAll(account.id);
+        scheduler.pump();
+        await until(() => store.job(current.id)?.status === 'running' && workers.length === 3);
+      }
+      workers.at(-1)!.send({ type: 'test_video_finished' });
+      await until(() => store.job(current.id)?.status === 'completed');
+    }
+    await until(() => !scheduler.isAccountBusy(account.id));
+    assert.equal(store.enqueueAll(account.id), 0);
+    assert.equal(workers.length, 7, '六个视频加一次停止后的恢复');
+  } finally { await scheduler.close(); store.close(); rmSync(directory, { recursive: true }); }
+});

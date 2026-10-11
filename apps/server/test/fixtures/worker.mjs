@@ -38,6 +38,12 @@ process.on('message', message => {
     process.disconnect();
     return;
   }
+  if (message.type === 'test_video_finished' && kind === 'playback') {
+    process.send({ type: 'progress', progress: { currentTime: 100, duration: 100, playbackState: 'ended', platformStatus: '待考试', sampledAt: new Date().toISOString() } });
+    process.send({ type: 'done', status: 'completed', message: '平台确认视频已学完' });
+    process.disconnect();
+    return;
+  }
   if (message.type === 'confirm' && kind === 'playback') {
     process.send({ type: 'playback_resumed', message: '验证完成，继续播放' });
     return;

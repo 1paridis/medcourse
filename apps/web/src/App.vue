@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { ACTIVE_JOB_STATUSES, VERIFICATION_RETRY_LIMIT_MESSAGE, type Account, type Course, type User, type Job, type JobKind, type JobLog, type JobStatus, type PlaybackState, type Overview } from '@medcourse/shared';
+import { ACTIVE_JOB_STATUSES, VERIFICATION_RETRY_LIMIT_MESSAGE, orderCourseVideos, type Account, type Course, type User, type Job, type JobKind, type JobLog, type JobStatus, type PlaybackState, type Overview } from '@medcourse/shared';
 import { api } from './api';
 
 const overview = ref<Overview>({ users: [], platforms: [], courses: [], accounts: [], jobs: [], maxConcurrency: 1 });
@@ -20,10 +20,9 @@ const currentPlatform = computed(() => overview.value.platforms.find(platform =>
 const accountCourses = computed(() => overview.value.courses.filter(course => course.accountId === currentAccount.value?.id));
 const visibleCourses = computed(() => accountCourses.value.filter(course => showArchived.value || !course.archivedAt));
 const activeCount = computed(() => overview.value.jobs.filter(job => ACTIVE_JOB_STATUSES.includes(job.status)).length);
-const videoJobs = computed(() => overview.value.jobs.filter(job => job.kind === 'playback' && job.accountId === currentAccount.value?.id
+const videoJobs = computed(() => orderCourseVideos(overview.value.jobs.filter(job => job.kind === 'playback' && job.accountId === currentAccount.value?.id
   && (!courseFilter.value || job.courseId === courseFilter.value)
-  && (showArchived.value || !overview.value.courses.find(course => course.id === job.courseId)?.archivedAt))
-  .sort((a, b) => (currentPlatform.value?.capabilities.execution ? Number(a.status === 'completed') - Number(b.status === 'completed') : 0) || a.url.localeCompare(b.url) || (a.position ?? 0) - (b.position ?? 0)));
+  && (showArchived.value || !overview.value.courses.find(course => course.id === job.courseId)?.archivedAt)), accountCourses.value));
 const visibleVideoJobs = computed(() => videoJobs.value.slice((currentPage.value - 1) * 20, currentPage.value * 20));
 const serviceJobs = computed(() => overview.value.jobs.filter(job => job.kind !== 'playback' && job.accountId === currentAccount.value?.id
   && (!courseFilter.value || !job.courseId || job.courseId === courseFilter.value)));
@@ -175,7 +174,7 @@ async function removeUser(user: User) {
 function start(account: Account, kind: JobKind, course?: Course) {
   void action(account.id, () => api('/jobs', { method: 'POST', body: JSON.stringify({ accountId: account.id, kind, ...(course ? { courseId: course.id } : {}) }) }));
 }
-function startAll(account: Account) { void action(account.id, async () => { const result = await api<{ queued: number }>(`/accounts/${account.id}/start-all`, { method: 'POST' }); ElMessage.success(`${result.queued} 个视频按顺序排队`); }); }
+function startAll(account: Account) { void action(account.id, async () => { const result = await api<{ queued: number }>(`/accounts/${account.id}/start-all`, { method: 'POST' }); ElMessage.success(`${result.queued} 个视频已按课程排队，学完一门再学下一门`); }); }
 function pauseAll(account: Account) { void action(account.id, async () => { await api(`/accounts/${account.id}/pause-all`, { method: 'POST' }); ElMessage.success('本站播放已暂停，进度已保存'); }); }
 function stop(job: Job) { void action(job.id, () => api(`/jobs/${job.id}/stop`, { method: 'POST' })); }
 async function openLogs(job: Job) { selectedJob.value = job; logs.value = []; await refresh(); }
@@ -238,7 +237,7 @@ onUnmounted(() => clearInterval(timer));
                   <div class="account-actions"><el-button :disabled="accountBusy(currentAccount.id)" @click="start(currentAccount, 'login')">登录本站</el-button><el-button v-if="currentPlatform.capabilities.execution" type="primary" :disabled="!canStartAll(currentAccount)" @click="startAll(currentAccount)">开始本站学习</el-button><el-button v-if="currentPlatform.capabilities.execution" :disabled="!canPauseAll(currentAccount.id)" @click="pauseAll(currentAccount)">暂停本站学习</el-button></div>
                   <el-alert v-if="needsAttention(currentAccount.id)" title="有视频需要人工处理。请先暂停，再通过网站设置的“登录本站”处理验证，登录状态自动记录，关闭窗口后继续本站学习。" type="warning" :closable="false" />
                 </div>
-                <el-alert v-if="currentAccount.platformId === 'huayi'" title="按顺序逐个播放未完成视频，待考试表示视频已学完；互动病例演练已排除，考试和身份验证需人工完成。" type="info" :closable="false" class="notice" />
+                <el-alert v-if="currentPlatform.capabilities.execution" :title="'按课程添加顺序学习，每门课程内按视频顺序逐个播放，学完一门再学下一门。' + (currentAccount.platformId === 'huayi' ? '待考试表示视频已学完；互动病例演练已排除，考试和身份验证需人工完成。' : '已学完的视频自动跳过，平台验证需人工完成。')" type="info" :closable="false" class="notice" />
                 <div class="section-heading course-heading"><h2>我的课程 <span class="count-badge">{{ courseCount(currentAccount.id) }}</span></h2><div class="heading-actions"><el-checkbox v-model="showArchived">显示已移除课程</el-checkbox><el-button type="primary" @click="openCourseDialog()">＋ 添加课程</el-button></div></div>
                 <el-table :data="visibleCourses" row-key="id" empty-text="还没有添加课程，点击“添加课程”粘贴学习链接，名称自动读取。">
                   <el-table-column label="课程" min-width="170"><template #default="{ row }"><strong class="video-title">{{ row.name }}</strong><el-tag v-if="row.archivedAt" size="small" type="info">已移除 · 历史保留</el-tag><div class="video-meta course-link" :title="row.learningUrl">{{ row.learningUrl }}</div></template></el-table-column>
@@ -249,7 +248,7 @@ onUnmounted(() => clearInterval(timer));
                 </el-table>
               </section>
               <section v-if="currentPlatform.capabilities.playlist" class="section-card video-section">
-                <div class="section-heading"><div><h2>视频列表 <span class="count-badge">{{ videoJobs.length }}</span></h2><p>{{ currentPlatform.capabilities.execution ? '开始和暂停作用于本站全部未移除课程，下面可按课程筛选查看。' : '显示网站目录中的学习状态与进度；待考试的章节已学完，互动病例演练已排除。' }}</p></div><el-select v-model="courseFilter" placeholder="本站全部课程" clearable aria-label="筛选课程" style="width: 190px"><el-option v-for="course in visibleCourses" :key="course.id" :label="course.name + (course.archivedAt ? '（已移除）' : '')" :value="course.id" /></el-select></div>
+                <div class="section-heading"><div><h2>视频列表 <span class="count-badge">{{ videoJobs.length }}</span></h2><p>{{ currentPlatform.capabilities.execution ? '按课程添加顺序显示，课程内按视频顺序排列；开始和暂停作用于本站全部课程，筛选只改变显示。' : '显示网站目录中的学习状态与进度；待考试的章节已学完，互动病例演练已排除。' }}</p></div><el-select v-model="courseFilter" placeholder="本站全部课程" clearable aria-label="筛选课程" style="width: 190px"><el-option v-for="course in visibleCourses" :key="course.id" :label="course.name + (course.archivedAt ? '（已移除）' : '')" :value="course.id" /></el-select></div>
         <el-table :data="visibleVideoJobs" row-key="id" empty-text="还没有视频任务，在课程列表中选择一门课，点击“读取视频列表”。" style="width: 100%">
           <el-table-column label="视频" min-width="220"><template #default="{ row }"><strong class="video-title">{{ row.position }}. {{ row.chapterTitle }}</strong><div class="video-meta">{{ accountLabel(row.accountId) }} · {{ row.courseTitle }}</div><div class="video-meta">列表时长：{{ row.durationText || '未知' }}</div></template></el-table-column>
           <el-table-column :label="currentPlatform.capabilities.execution ? '任务状态' : '读取结果'" width="140"><template #default="{ row }"><el-tag :type="row.status === 'failed' ? 'danger' : ['needs_attention', 'waiting_user'].includes(row.status) ? 'warning' : row.status === 'completed' ? 'success' : 'info'">{{ row.status === 'waiting_user' ? '等待人工验证' : !currentPlatform.capabilities.execution && row.status === 'completed' ? '学习已完成' : !currentPlatform.capabilities.execution && row.status === 'idle' ? '已读取' : labels[row.status as JobStatus] }}</el-tag><div v-if="currentPlatform.capabilities.execution" class="video-meta">{{ row.sampledAt && !['running', 'waiting_user'].includes(row.status) ? '上次：' : '' }}{{ playbackLabels[row.playbackState as PlaybackState] }}</div></template></el-table-column>

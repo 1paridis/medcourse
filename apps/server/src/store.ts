@@ -298,8 +298,14 @@ export class Store {
 
   enqueue(id: string): boolean {
     const job = this.job(id);
-    if (!job || !this.canExecute(job.accountId, job.courseId) || job.kind !== 'playback' || ['queued', 'running', 'waiting_user', 'excluded'].includes(job.status)) return false;
+    if (!job || !this.canExecute(job.accountId, job.courseId) || job.kind !== 'playback' || ['queued', 'running', 'waiting_user', 'completed', 'excluded'].includes(job.status)) return false;
     if (this.db.prepare("SELECT id FROM jobs WHERE accountId = ? AND NOT EXISTS (SELECT 1 FROM courses c WHERE c.id = jobs.courseId AND c.archivedAt IS NOT NULL) AND ((kind != 'playback' AND status IN ('queued', 'running', 'waiting_user')) OR (status = 'needs_attention' AND id != ?))").get(job.accountId, id)) return false;
+    // 单视频入口也遵循本站课程顺序，不能绕过前面尚未完成的视频。
+    const first = this.db.prepare(`SELECT pending.id FROM jobs pending LEFT JOIN courses c ON c.id = pending.courseId
+      WHERE pending.accountId = ? AND pending.kind = 'playback' AND pending.status NOT IN ('completed', 'excluded') AND c.archivedAt IS NULL
+      ORDER BY COALESCE(c.createdAt, pending.createdAt), COALESCE(c.rowid, pending.rowid), COALESCE(pending.position, 0), pending.rowid LIMIT 1`)
+      .get(job.accountId) as { id: string } | undefined;
+    if (first?.id !== id) return false;
     this.updateJob(id, 'queued', '等待播放；从平台当前进度开始');
     return true;
   }
@@ -308,18 +314,26 @@ export class Store {
     if (!this.canExecute(accountId)) return 0;
     if (this.db.prepare("SELECT id FROM jobs WHERE accountId = ? AND kind != 'playback' AND status IN ('queued', 'running', 'waiting_user')").get(accountId)) return 0;
     // 账号整体开始也负责继续暂停、重试失败及人工处理后的任务，已完成视频保留。
-    return Number(this.db.prepare(`UPDATE jobs SET status = 'queued', detail = '等待播放；从平台当前进度开始', updatedAt = ?
+    return Number(this.db.prepare(`UPDATE jobs SET status = 'queued', detail = '按课程添加顺序排队，课程内按视频顺序播放；从平台当前进度继续', updatedAt = ?
       WHERE accountId = ? AND NOT EXISTS (SELECT 1 FROM courses c WHERE c.id = jobs.courseId AND c.archivedAt IS NOT NULL) AND kind = 'playback' AND status IN ('idle', 'paused', 'stopped', 'interrupted', 'failed', 'needs_attention')`)
       .run(new Date().toISOString(), accountId).changes);
   }
 
   nextQueued(excludedAccounts: string[] = []): Job | undefined {
     const placeholders = excludedAccounts.map(() => '?').join(',');
-    return this.db.prepare(`SELECT j.* FROM jobs j JOIN accounts a ON a.id = j.accountId WHERE j.status = 'queued' AND (a.platformId = 'henan' OR (a.platformId = 'huayi' AND ((j.kind = 'login' AND j.courseId IS NULL AND j.url = ?) OR (j.kind IN ('playlist', 'playback') AND j.courseId IS NOT NULL))))
+    // 每个账号只允许最前面的未完成视频启动，暂停或失败也不能被后续课程越过。
+    return this.db.prepare(`WITH unfinishedVideos AS (
+        SELECT pending.id, ROW_NUMBER() OVER (PARTITION BY pending.accountId
+          ORDER BY COALESCE(c.createdAt, pending.createdAt), COALESCE(c.rowid, pending.rowid), COALESCE(pending.position, 0), pending.rowid) AS learningOrder
+        FROM jobs pending LEFT JOIN courses c ON c.id = pending.courseId
+        WHERE pending.kind = 'playback' AND pending.status NOT IN ('completed', 'excluded') AND c.archivedAt IS NULL
+      )
+      SELECT j.* FROM jobs j JOIN accounts a ON a.id = j.accountId WHERE j.status = 'queued' AND (a.platformId = 'henan' OR (a.platformId = 'huayi' AND ((j.kind = 'login' AND j.courseId IS NULL AND j.url = ?) OR (j.kind IN ('playlist', 'playback') AND j.courseId IS NOT NULL))))
       AND NOT EXISTS (SELECT 1 FROM courses c WHERE c.id = j.courseId AND c.archivedAt IS NOT NULL)
       AND NOT EXISTS (SELECT 1 FROM jobs active WHERE active.accountId = j.accountId AND active.status IN ('running', 'waiting_user'))
       ${excludedAccounts.length ? `AND j.accountId NOT IN (${placeholders})` : ''}
       AND NOT (j.kind = 'playback' AND EXISTS (SELECT 1 FROM jobs blocked WHERE blocked.accountId = j.accountId AND blocked.kind = 'playback' AND blocked.status = 'needs_attention' AND NOT EXISTS (SELECT 1 FROM courses c WHERE c.id = blocked.courseId AND c.archivedAt IS NOT NULL)))
+      AND (j.kind != 'playback' OR j.id IN (SELECT id FROM unfinishedVideos WHERE learningOrder = 1))
       ORDER BY COALESCE((SELECT c.createdAt FROM courses c WHERE c.id = j.courseId AND j.kind = 'playback'), j.createdAt),
         COALESCE((SELECT c.rowid FROM courses c WHERE c.id = j.courseId AND j.kind = 'playback'), j.rowid),
         COALESCE(j.position, 0), j.rowid LIMIT 1`).get(platformById('huayi')!.entryUrl, ...excludedAccounts) as unknown as Job | undefined;

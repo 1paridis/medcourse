@@ -89,6 +89,17 @@ export interface Job extends PlaybackProgress {
   updatedAt: string;
 }
 
+// courses 来自按添加时间及插入顺序排列的目录；已完成的视频也保留在课程原位置。
+export function orderCourseVideos(jobs: readonly Job[], courses: readonly Course[]): Job[] {
+  const ranks = new Map(courses.map((course, index) => [course.id, index]));
+  return [...jobs].sort((a, b) => {
+    const aRank = ranks.get(a.courseId ?? '') ?? courses.length;
+    const bRank = ranks.get(b.courseId ?? '') ?? courses.length;
+    return aRank - bRank || (aRank === courses.length ? a.url.localeCompare(b.url) : 0)
+      || (a.position ?? 0) - (b.position ?? 0) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id);
+  });
+}
+
 export interface JobLog {
   id: number;
   jobId: string;

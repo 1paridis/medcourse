@@ -155,7 +155,7 @@ export async function createApp(options: {
     if (!job) return reply.code(404).send({ message: '任务不存在' });
     if (!store.canExecute(job.accountId, job.courseId)) return reply.code(409).send({ message: '该网站学习功能尚未接入，或课程已移除' });
     if (store.account(job.accountId)?.loginState !== 'saved') return reply.code(409).send({ message: '请先完成人工登录，登录成功后会自动记录' });
-    if (!store.enqueue(job.id)) return reply.code(409).send({ message: '视频任务当前不可启动，或账号正在进行登录、读取或检查' });
+    if (!store.enqueue(job.id)) return reply.code(409).send({ message: '请按课程及视频顺序学习；前面的内容尚未完成，任务已结束，或账号正在处理其他任务' });
     store.log(job.id, 'info', '视频已排队，从平台当前进度播放，不根据本地记录跳转视频时间');
     scheduler.pump();
     return reply.code(202).send({ ok: true });
