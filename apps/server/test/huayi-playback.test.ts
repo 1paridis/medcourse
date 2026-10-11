@@ -7,19 +7,32 @@ const course = 'https://cme28.91huayi.com/pages/course.aspx?cid=course-a';
 const target = 'https://cme28.91huayi.com/course_ware/course_ware.aspx?cwid=video-a';
 const visibleStyle = { display: 'block', visibility: 'visible', opacity: '1' };
 
-function frame(options: { video?: any; dialog?: string; hidden?: boolean; login?: boolean; activeChapter?: string } = {}) {
+type FrameOptions = { video?: any; dialog?: string; hidden?: boolean; login?: boolean; activeChapter?: string;
+  signIn?: boolean; signText?: string; clickFails?: boolean; stickyReminder?: boolean };
+function frame(options: FrameOptions = {}) {
+  let reminderVisible = !!options.signIn, clicks = 0;
   const element = (text: string) => ({ textContent: text, parentElement: null, getClientRects: () => [{}], getAttribute: () => null,
     style: { ...visibleStyle, ...(options.hidden ? { display: 'none' } : {}) } });
   const document = {
     body: { innerText: '' },
     querySelector: () => options.activeChapter ? { querySelector: (selector: string) => selector.includes('data-cwrid') ? { dataset: { cwrid: options.activeChapter } } : { textContent: '学习中' } } : null,
     querySelectorAll: (selector: string) => selector === 'video' ? options.video ? [options.video] : []
+      : selector.includes('btn_sign') ? reminderVisible ? [element(options.signText ?? '好的，知道了')] : []
       : selector.includes('password') ? options.login ? [element('')] : []
         : selector.includes('role=') ? options.dialog ? [element(options.dialog)] : [] : [],
   };
   return {
     evaluate: (fn: Function, input: unknown) => runInNewContext(`(${fn.toString()})(input)`, { document, input, getComputedStyle: (element: any) => element.style }),
-    locator: () => ({ evaluateAll: async (fn: Function) => fn(options.video ? [options.video] : []) }),
+    locator: () => ({ evaluateAll: async (fn: Function) => fn(options.video ? [options.video] : []),
+      filter: ({ hasText }: { hasText: RegExp }) => ({
+        count: async () => reminderVisible && hasText.test(options.signText ?? '好的，知道了') ? 1 : 0,
+        nth: () => ({ isVisible: async () => reminderVisible && !options.hidden,
+          click: async () => { clicks++; if (options.clickFails) throw new Error('click failed'); if (!options.stickyReminder) reminderVisible = false; },
+          waitFor: async () => { if (reminderVisible) throw new Error('still visible'); },
+        }),
+      }),
+    }),
+    clicks: () => clicks,
     isDetached: () => false,
   };
 }
@@ -29,13 +42,15 @@ function video(overrides = {}) {
     hasAttribute: () => false, setAttribute: () => {}, addEventListener: () => {},
     play() { this.paused = false; return Promise.resolve(); }, pause() { this.paused = true; }, ...overrides };
 }
-function fixture(options: { current?: string; nested?: boolean; dialog?: string; hidden?: boolean; login?: boolean; multiple?: boolean; ended?: boolean; activeChapter?: string; sideLogin?: boolean } = {}) {
+function fixture(options: FrameOptions & { current?: string; nested?: boolean; multiple?: boolean; ended?: boolean;
+  sideLogin?: boolean; nestedReminder?: boolean; sideReminder?: boolean; finished?: boolean } = {}) {
   const media = video({ ended: !!options.ended });
-  const main = frame({ ...options, video: options.nested ? undefined : media });
-  const frames = options.nested ? [main, frame({ video: media })] : [main];
+  const main = frame({ ...options, signIn: options.signIn && !options.nestedReminder, video: options.nested ? undefined : media });
+  const frames = options.nested ? [main, frame({ ...options, signIn: options.signIn && options.nestedReminder, video: media })] : [main];
   if (options.multiple) frames.push(frame({ video: video() }));
   if (options.sideLogin) frames.push(frame({ login: true }));
-  let requests = 0, closes = 0;
+  if (options.sideReminder) frames.push(frame({ signIn: true }));
+  let requests = 0, closes = 0, reminders = 0;
   const directory = {
     addInitScript: async () => {}, goto: async () => { requests++; }, url: () => course,
     locator: () => ({ first: () => ({ waitFor: async () => {} }) }),
@@ -43,7 +58,10 @@ function fixture(options: { current?: string; nested?: boolean; dialog?: string;
     close: async () => { closes++; },
   };
   const page = { url: () => options.current ?? target, mainFrame: () => main, frames: () => frames, context: () => ({ newPage: async () => directory }) };
-  return { player: new HuayiPlayer(page as never, course, 'video-a', '学习中'), media, requests: () => requests, closes: () => closes };
+  return { player: new HuayiPlayer(page as never, course, 'video-a', '学习中', {
+    onReminder: () => reminders++, isFinished: () => !!options.finished,
+  }), media, requests: () => requests, closes: () => closes, reminders: () => reminders,
+    clicks: () => frames.reduce((sum, frame) => sum + frame.clicks(), 0) };
 }
 
 test('华医播放页必须匹配课程域名、章节标识和播放路径', () => {
@@ -109,7 +127,7 @@ test('华医隐藏验证不会中断，可见验证和登录阻止恢复，结�
 });
 
 test('华医自然结束后单独读取所属课程确认待考试，保留媒体进度并关闭确认页', async () => {
-  const f = fixture({ ended: true, nested: true });
+  const f = fixture({ ended: true, nested: true, activeChapter: 'video-a' });
   const state = await f.player.readForMonitor();
   assert.equal(state.ended, true);
   assert.equal(state.progress.platformStatus, '待考试');
@@ -118,4 +136,61 @@ test('华医自然结束后单独读取所属课程确认待考试，保留媒�
   assert.equal(f.closes(), 1);
   await f.player.readForMonitor();
   assert.equal(f.requests(), 1, '确认请求有间隔限制');
+  assert.equal((await f.player.read()).progress.platformStatus, '待考试', '最终快照不被旧侧栏的学习中覆盖');
+});
+
+test('华医温馨提示在主页面或媒体 iframe 自动点击后恢复，快照只读且不会重复点击', async () => {
+  for (const options of [{}, { nested: true }, { nested: true, nestedReminder: true }]) {
+    const f = fixture({ ...options, signIn: true });
+    f.media.pause();
+    assert.match((await f.player.read()).needsAttention!, /温馨提示.*好的，知道了/);
+    assert.equal(f.clicks(), 0, '暂停时读取快照不会处理弹窗');
+    const state = await f.player.readForMonitor();
+    assert.equal(state.needsAttention, null);
+    assert.equal(state.progress.currentTime, 1451);
+    assert.equal(state.progress.playbackState, 'playing');
+    assert.equal(f.media.playbackRate, 1);
+    assert.equal(f.clicks(), 1);
+    assert.equal(f.reminders(), 1);
+    assert.equal(f.requests(), 0);
+    await f.player.readForMonitor();
+    assert.equal(f.clicks(), 1);
+  }
+});
+
+test('华医启动时已有温馨提示会自动确认；隐藏提示及无关 iframe 的按钮不点击', async () => {
+  const startup = fixture({ signIn: true });
+  startup.media.pause();
+  assert.equal((await startup.player.ready()).needsAttention, null);
+  assert.equal(startup.clicks(), 1);
+  assert.equal(startup.media.paused, false);
+  const hidden = fixture({ signIn: true, hidden: true });
+  assert.equal((await hidden.player.readForMonitor()).needsAttention, null);
+  assert.equal(hidden.clicks(), 0);
+  const unrelated = fixture({ sideReminder: true });
+  assert.equal((await unrelated.player.readForMonitor()).needsAttention, null);
+  assert.equal(unrelated.clicks(), 0);
+});
+
+test('华医提示点击失败、未关闭或按钮文案不匹配时保持等待，不恢复媒体', async () => {
+  for (const options of [{ clickFails: true }, { stickyReminder: true }, { signText: '开始人脸验证' }]) {
+    const f = fixture({ ...options, signIn: true });
+    f.media.pause();
+    const state = await f.player.readForMonitor();
+    assert.match(state.needsAttention!, /打卡验证/);
+    assert.equal(f.media.paused, true);
+    assert.equal(f.reminders(), 0);
+    assert.equal(f.requests(), 0);
+  }
+});
+
+test('华医章节不匹配、多个播放器、登录或身份验证及已停止任务均不自动点击', async () => {
+  for (const options of [{ current: target.replace('video-a', 'other') }, { activeChapter: 'other' },
+    { multiple: true }, { login: true }, { dialog: '请完成人脸身份验证' }, { finished: true }]) {
+    const f = fixture({ ...options, signIn: true });
+    f.media.pause();
+    assert.ok((await f.player.readForMonitor()).needsAttention);
+    assert.equal(f.clicks(), 0);
+    assert.equal(f.media.paused, true);
+  }
 });

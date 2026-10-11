@@ -51,6 +51,7 @@ export interface Account {
   name: string;
   courseUrl: string;
   loginState: 'none' | 'saved';
+  showBrowser: boolean;
   createdAt: string;
 }
 
@@ -118,8 +119,8 @@ export interface Overview {
 }
 
 export type WorkerCommand =
-  | { type: 'start'; job: Job; platformId: PlatformId; profileDir: string; channel: string }
-  | { type: 'course_name'; requestId: string; url: string; platformId: PlatformId; profileDir: string; channel: string }
+  | { type: 'start'; job: Job; platformId: PlatformId; profileDir: string; channel: string; showBrowser?: boolean }
+  | { type: 'course_name'; requestId: string; url: string; platformId: PlatformId; profileDir: string; channel: string; showBrowser?: boolean }
   | { type: 'cancel_course_name'; requestId: string }
   | { type: 'confirm' }
   | { type: 'pause' }

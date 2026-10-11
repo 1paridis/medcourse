@@ -84,7 +84,10 @@ async function play(page: Page): Promise<'restart' | void> {
       await finish('completed', '华医网已确认本视频学习结束，无需重播；考试需人工处理，继续下一视频');
       return;
     }
-    huayiPlayer = new HuayiPlayer(page, command.job.url, id, item.platformStatus);
+    huayiPlayer = new HuayiPlayer(page, command.job.url, id, item.platformStatus, {
+      isFinished: () => finished,
+      onReminder: () => send({ type: 'log', level: 'info', message: '已自动点击华医网温馨提示“好的，知道了”，继续播放并记录实际进度' }),
+    });
     playbackPage = page;
     initial = await huayiPlayer.ready();
     if (!initial.needsAttention && initial.progress.playbackState === 'unknown') {
@@ -175,11 +178,13 @@ async function play(page: Page): Promise<'restart' | void> {
         send({ type: 'log', level: 'info', message: `检测到打卡提示，保存实际进度后暂停并重新启动当前视频（1 分钟内第 ${attempt}/${VERIFICATION_RESTART_MAX_ATTEMPTS} 次）` });
         return 'restart';
       }
-      const detail = checkin && !huayiPlayer ? VERIFICATION_RETRY_LIMIT_MESSAGE : '请先暂停本站学习，再通过“登录本站”完成验证；登录状态自动记录，关闭窗口后点击“开始本站学习”';
+      const detail = checkin && !huayiPlayer ? VERIFICATION_RETRY_LIMIT_MESSAGE
+        : command?.showBrowser ? '请在当前播放窗口完成人工验证，完成后会自动继续播放。'
+          : '请先暂停本站学习，开启“显示浏览器”后重新开始，在播放窗口完成人工验证；也可通过“登录”处理。';
       if (checkin && !huayiPlayer) logVerification('restart_limit_reached', { verificationId, progress,
         windowMs: VERIFICATION_RESTART_WINDOW_MS, maxAttempts: VERIFICATION_RESTART_MAX_ATTEMPTS });
       send({ type: 'waiting_user', message: `${message}；${detail}` });
-      send({ type: 'log', level: 'info', message: `${message}；无头播放正在等待，请先暂停，再通过“人工登录”处理验证` });
+      send({ type: 'log', level: 'info', message: `${message}；${detail}` });
     },
     onResume: async () => {
       await resumeVideo();
@@ -191,7 +196,7 @@ async function play(page: Page): Promise<'restart' | void> {
 
 async function openPage(input: Extract<WorkerCommand, { type: 'start' }>): Promise<Page | undefined> {
   context = await chromium.launchPersistentContext(input.profileDir, {
-    channel: input.channel, headless: input.job.kind !== 'login',
+    channel: input.channel, headless: input.job.kind !== 'login' && !input.showBrowser,
     // 保利威会恢复播放器自己的音量；后台播放同时在浏览器层静音。
     args: input.job.kind === 'playback' ? ['--mute-audio'] : [],
     viewport: { width: 1360, height: 900 }, locale: 'zh-CN',
@@ -203,7 +208,8 @@ async function openPage(input: Extract<WorkerCommand, { type: 'start' }>): Promi
     if (context !== openedContext) return;
     browserClosed = true;
     void finish(input.job.kind === 'login' && loginSaved ? 'completed' : 'stopped',
-      input.job.kind === 'login' && loginSaved ? '登录状态已自动记录，浏览器窗口已关闭' : '浏览器窗口已关闭，未确认新的登录状态', savedCourseUrl);
+      input.job.kind === 'login' ? loginSaved ? '登录状态已自动记录，浏览器窗口已关闭' : '浏览器窗口已关闭，未确认新的登录状态'
+        : '浏览器窗口已关闭，任务停止，进度已保留', savedCourseUrl);
   });
   context.setDefaultTimeout(15_000);
   try { await restoreAccountSession(context, input.profileDir, input.platformId ?? 'henan'); }
@@ -250,6 +256,13 @@ async function start(input: Extract<WorkerCommand, { type: 'start' }>): Promise<
         savedCourseUrl = selectedUrl;
       },
     });
+    // 登录跳转完成后立即检查，减少用户登录后很快关闭窗口而错过定时保存的机会。
+    const observeLogin = (page: Page) => {
+      page.on('domcontentloaded', () => { void refreshLogin(); });
+      page.on('framenavigated', () => { void refreshLogin(); });
+    };
+    for (const page of context!.pages()) observeLogin(page);
+    context!.on('page', observeLogin);
     while (!finished) {
       await refreshLogin();
       if (!finished) await delay(1000);
@@ -264,7 +277,7 @@ async function start(input: Extract<WorkerCommand, { type: 'start' }>): Promise<
     return;
   }
   if (input.job.kind === 'playback') {
-    send({ type: 'log', level: 'info', message: '使用无头浏览器在后台播放视频' });
+    send({ type: 'log', level: 'info', message: input.showBrowser ? '使用可见浏览器播放视频' : '使用无头浏览器在后台播放视频' });
     await runPlaybackWithRestarts(page, {
       play,
       pause: async page => {
@@ -313,7 +326,7 @@ async function extractCourseName(input: Extract<WorkerCommand, { type: 'course_n
     if (namePages.size) throw new Error('正在读取课程名称，请稍后再试');
     if (!context) {
       context = await chromium.launchPersistentContext(input.profileDir, {
-        channel: input.channel, headless: false, viewport: { width: 1360, height: 900 }, locale: 'zh-CN',
+        channel: input.channel, headless: !input.showBrowser, viewport: { width: 1360, height: 900 }, locale: 'zh-CN',
       });
       await restoreAccountSession(context, input.profileDir, input.platformId);
     }
@@ -329,7 +342,8 @@ async function extractCourseName(input: Extract<WorkerCommand, { type: 'course_n
       }, liveStorage);
     }
     namePages.set(input.requestId, { page, createdPage });
-    result = { name: await readCourseName(page, input.platformId, input.url) };
+    const allowManualLogin = !owned || !!input.showBrowser;
+    result = { name: await readCourseName(page, input.platformId, input.url, allowManualLogin ? 180_000 : 20_000, allowManualLogin) };
     const authenticated = await findAuthenticatedPage(context, input.platformId);
     if (authenticated) {
       const selectedUrl = await saveLoginSession(context, authenticated, input.profileDir, input.platformId);

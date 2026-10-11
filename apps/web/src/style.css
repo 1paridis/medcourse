@@ -75,6 +75,7 @@ footer { text-align: center; font-size: 11px; color: #99a399; line-height: 1.8; 
 .heading-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .heading-actions .el-button + .el-button { margin-left: 0; }
 .website-controls { display: flex; flex-direction: column; gap: 16px; padding-bottom: 24px; margin-bottom: 22px; border-bottom: 1px solid #e7ece5; }
+.browser-setting { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 20px; }
 .course-heading { margin-top: 12px; }
 .course-link { overflow-wrap: anywhere; }
 button:focus-visible { outline: 3px solid #7bb6a6; outline-offset: 3px; }

@@ -7,16 +7,17 @@ import { tmpdir } from 'node:os';
 import { isAuthenticated, isLoginOrigin, findAuthenticatedPage, LoginRecorder, saveLoginSession } from '../src/automation/login.js';
 import { writeSessionFile } from '../src/automation/course-name.js';
 
-function page(url: string, state: { password?: boolean; logout?: string; hiddenLogout?: boolean; account?: boolean; login?: boolean } = {}) {
+function page(url: string, state: { password?: boolean; logout?: string; hiddenLogout?: boolean; account?: boolean; login?: boolean; course?: boolean; cmeUserId?: string } = {}) {
   const node = (text: string, visible = true) => ({ textContent: text, getClientRects: () => visible ? [{}] : [] });
   const document = {
     querySelectorAll: (selector: string) => selector.includes('password')
       ? state.password ? [node('')] : [] : state.logout ? [node(state.logout, !state.hiddenLogout)] : [],
     querySelector: (selector: string) => selector === '#ifssologed' ? state.account ? node('Hi') : null
-      : state.login ? node('登录') : null,
+      : selector === '#ssologin' ? state.login ? node('登录') : null
+        : selector === '.course[data-href] .cw-title-link' && state.course ? node('课程') : null,
   };
   const result = { url: () => url, evaluate: async (fn: Function, id: string) => runInNewContext(`(${fn.toString()})(id)`, {
-    id, document, location: { href: url }, URL, __name: (value: unknown) => value, getComputedStyle: () => ({ visibility: 'visible' }),
+    id, document, window: { cmeUserId: state.cmeUserId }, location: { href: url }, URL, getComputedStyle: () => ({ visibility: 'visible' }),
   }), frames: () => [result] };
   return result;
 }
@@ -26,6 +27,18 @@ test('自动识别只接受所属网站 HTTPS 页面，不接受相似域名和�
   for (const value of ['http://91huayi.com/', 'https://evil91huayi.com/', 'https://91huayi.com.evil.test/', 'https://91huayi.com:444/', 'https://user@91huayi.com/', 'about:blank']) assert.equal(isLoginOrigin(value, 'huayi'), false);
   assert.equal(isLoginOrigin('https://yuancheng.henanyixue.com/#/', 'henan'), true);
   assert.equal(isLoginOrigin('https://cme28.91huayi.com/', 'henan'), false);
+});
+
+test('华医网已鉴权课程页没有退出按钮仍能识别，目录、账号标识、地址必须同时有效', async () => {
+  const url = 'https://cme28.91huayi.com/pages/course.aspx?cid=course';
+  const state = { course: true, cmeUserId: '11111111-2222-3333-4444-555555555555' };
+  assert.equal(await isAuthenticated(page(url, state) as never, 'huayi'), true);
+  for (const invalid of [{ course: true }, { cmeUserId: state.cmeUserId }, { ...state, cmeUserId: 'undefined' }, { ...state, password: true }]) {
+    assert.equal(await isAuthenticated(page(url, invalid) as never, 'huayi'), false);
+  }
+  for (const invalid of ['https://cme28.91huayi.com/secure/login.aspx', 'https://cme28.91huayi.com/pages/course.aspx', 'https://foreign.example/pages/course.aspx?cid=course']) {
+    assert.equal(await isAuthenticated(page(invalid, state) as never, 'huayi'), false);
+  }
 });
 
 test('首页无密码框也不能证明登录；隐藏退出模板、未登录账号区均不触发自动记录', async () => {

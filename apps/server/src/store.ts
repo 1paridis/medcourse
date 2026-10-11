@@ -16,10 +16,10 @@ export class Store {
   constructor(path: string) {
     this.db = new DatabaseSync(path);
     const version = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-    if (version > 3) { this.db.close(); throw new Error('数据库版本高于当前程序，请使用新版程序'); }
+    if (version > 4) { this.db.close(); throw new Error('数据库版本高于当前程序，请使用新版程序'); }
     // VACUUM INTO 包含 WAL 中的已提交数据；只备份旧数据库，不修改浏览器资料。
-    if (path !== ':memory:' && version < 3 && this.db.prepare("SELECT name FROM sqlite_master WHERE name = 'accounts'").get()) {
-      this.db.prepare('VACUUM INTO ?').run(`${path}.pre-v3-${Date.now()}.bak`);
+    if (path !== ':memory:' && version < 4 && this.db.prepare("SELECT name FROM sqlite_master WHERE name = 'accounts'").get()) {
+      this.db.prepare('VACUUM INTO ?').run(`${path}.pre-v${version < 3 ? 3 : 4}-${Date.now()}.bak`);
     }
     this.db.exec(`
       PRAGMA journal_mode = WAL;
@@ -60,6 +60,7 @@ export class Store {
       const accountColumns = new Set((this.db.prepare('PRAGMA table_info(accounts)').all() as { name: string }[]).map(column => column.name));
       if (!accountColumns.has('userId')) this.db.exec('ALTER TABLE accounts ADD COLUMN userId TEXT REFERENCES users(id) ON DELETE CASCADE');
       if (!accountColumns.has('platformId')) this.db.exec("ALTER TABLE accounts ADD COLUMN platformId TEXT NOT NULL DEFAULT 'henan'");
+      if (!accountColumns.has('showBrowser')) this.db.exec('ALTER TABLE accounts ADD COLUMN showBrowser INTEGER NOT NULL DEFAULT 0 CHECK (showBrowser IN (0, 1))');
       for (const [name, type] of Object.entries(additions)) {
         if (!columns.has(name)) this.db.exec(`ALTER TABLE jobs ADD COLUMN ${name} ${type}`);
       }
@@ -92,18 +93,26 @@ export class Store {
         this.db.exec("UPDATE jobs SET status = 'interrupted', detail = '多网站数据升级完成，请手动继续任务' WHERE status IN ('queued', 'running', 'waiting_user')");
       }
       this.db.exec(`
-        PRAGMA user_version = 3;
+        PRAGMA user_version = 4;
         COMMIT;
       `);
     } catch (error) { this.db.exec('ROLLBACK'); this.db.close(); throw error; }
   }
 
   accounts(): Account[] {
-    return this.db.prepare('SELECT * FROM accounts ORDER BY createdAt, id').all() as unknown as Account[];
+    const accounts = this.db.prepare('SELECT * FROM accounts ORDER BY createdAt, id').all() as unknown as Account[];
+    return accounts.map(account => ({ ...account, showBrowser: !!account.showBrowser }));
   }
 
   account(id: string): Account | undefined {
-    return this.db.prepare('SELECT * FROM accounts WHERE id = ?').get(id) as unknown as Account | undefined;
+    const account = this.db.prepare('SELECT * FROM accounts WHERE id = ?').get(id) as unknown as Account | undefined;
+    return account ? { ...account, showBrowser: !!account.showBrowser } : undefined;
+  }
+
+  setShowBrowser(id: string, showBrowser: boolean): Account {
+    if (!this.account(id)) throw new StoreError('网站账号不存在', 404);
+    this.db.prepare('UPDATE accounts SET showBrowser = ? WHERE id = ?').run(showBrowser ? 1 : 0, id);
+    return this.account(id)!;
   }
 
   users(): User[] { return this.db.prepare('SELECT * FROM users ORDER BY createdAt, rowid').all() as unknown as User[]; }
@@ -141,7 +150,7 @@ export class Store {
   }
 
   private insertAccount(name: string, courseUrl: string, userId: string, platformId: PlatformId): Account {
-    const account: Account = { id: randomUUID(), userId, platformId, name, courseUrl, loginState: 'none', createdAt: new Date().toISOString() };
+    const account: Account = { id: randomUUID(), userId, platformId, name, courseUrl, loginState: 'none', showBrowser: false, createdAt: new Date().toISOString() };
     this.db.prepare('INSERT INTO accounts(id, name, courseUrl, loginState, createdAt, userId, platformId) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(account.id, account.name, account.courseUrl, account.loginState, account.createdAt, userId, platformId);
     return account;

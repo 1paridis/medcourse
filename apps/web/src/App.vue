@@ -81,6 +81,10 @@ function canStartAll(account: Account) {
 }
 function canPauseAll(id: string) { return !busy.value.has(id) && accountVideos(id).some(job => ACTIVE_JOB_STATUSES.includes(job.status)); }
 function needsAttention(id: string) { return accountVideos(id).some(job => ['needs_attention', 'waiting_user'].includes(job.status)); }
+function attentionMessage(account: Account) {
+  const waiting = accountVideos(account.id).find(job => job.status === 'waiting_user');
+  return waiting ? waiting.detail : '有视频需要人工处理。可暂停后开启“显示浏览器”再开始，查看网站提示；如需重新登录，请点击“登录”。';
+}
 async function refresh(fresh = false): Promise<void> {
   if (refreshing) { await refreshing; if (!fresh) return; }
   const request = loadOverview();
@@ -105,6 +109,11 @@ async function action(key: string, operation: () => Promise<unknown>) {
   try { await operation(); await refresh(true); }
   catch (error) { ElMessage.error(error instanceof Error ? error.message : '操作失败'); }
   finally { busy.value.delete(key); }
+}
+async function setShowBrowser(account: Account, value: boolean | string | number) {
+  await action(`browser-${account.id}`, async () => {
+    await api(`/accounts/${account.id}/browser`, { method: 'PATCH', body: JSON.stringify({ showBrowser: value === true }) });
+  });
 }
 function openUserDialog(user: User | null = null) { editingUser.value = user; userName.value = user?.name ?? ''; formError.value = ''; userDialog.value = true; }
 async function saveUser() {
@@ -233,9 +242,10 @@ onUnmounted(() => clearInterval(timer));
               <section class="section-card">
                 <div class="section-heading"><div><h2>网站设置 · {{ currentUser.name }} / {{ currentPlatform.name }}</h2><p>这里的课程仅属于当前用户在这个网站的账号。</p></div><el-button text type="danger" :disabled="accountBusy(currentAccount.id)" @click="removeAccount(currentAccount)">移除网站</el-button></div>
                 <div v-if="currentPlatform.capabilities.login" class="website-controls">
+                  <div class="browser-setting"><el-switch :model-value="currentAccount.showBrowser" :loading="busy.has(`browser-${currentAccount.id}`)" :disabled="busy.has(`browser-${currentAccount.id}`)" active-text="显示浏览器" inactive-text="无头模式" aria-label="显示浏览器" @change="setShowBrowser(currentAccount, $event)" /><span class="form-hint">仅对当前用户的本站生效，下次启动任务时使用。人工登录始终显示窗口。</span></div>
                   <span class="form-hint">{{ currentAccount.loginState === 'saved' ? '本站所有课程共用已保存的登录资料，是否有效以实际读取结果为准。' : '请通过登录本站完成人工登录，成功后自动记录，本站所有课程共用。' }}</span>
                   <div class="account-actions"><el-button :disabled="accountBusy(currentAccount.id)" @click="start(currentAccount, 'login')">登录</el-button><el-button v-if="currentPlatform.capabilities.execution" type="primary" :disabled="!canStartAll(currentAccount)" @click="startAll(currentAccount)">开始学习</el-button><el-button v-if="currentPlatform.capabilities.execution" :disabled="!canPauseAll(currentAccount.id)" @click="pauseAll(currentAccount)">暂停</el-button></div>
-                  <el-alert v-if="needsAttention(currentAccount.id)" title="有视频需要人工处理。请先暂停，再通过网站设置的“登录本站”处理验证，登录状态自动记录，关闭窗口后继续本站学习。" type="warning" :closable="false" />
+                  <el-alert v-if="needsAttention(currentAccount.id)" :title="attentionMessage(currentAccount)" type="warning" :closable="false" />
                 </div>
                 <el-alert v-if="currentPlatform.capabilities.execution" :title="'按课程添加顺序学习，每门课程内按视频顺序逐个播放，学完一门再学下一门。' + (currentAccount.platformId === 'huayi' ? '待考试表示视频已学完；互动病例演练已排除，考试和身份验证需人工完成。' : '已学完的视频自动跳过，平台验证需人工完成。')" type="info" :closable="false" class="notice" />
                 <div class="section-heading course-heading"><h2>我的课程 <span class="count-badge">{{ courseCount(currentAccount.id) }}</span></h2><div class="heading-actions"><el-checkbox v-model="showArchived">显示已移除课程</el-checkbox><el-button type="primary" @click="openCourseDialog()">＋ 添加课程</el-button></div></div>
@@ -290,7 +300,7 @@ onUnmounted(() => clearInterval(timer));
       <el-form label-position="top" @submit.prevent="saveCourse">
         <el-form-item v-if="editingCourse" label="课程名称" required><el-input v-model="courseName" :disabled="busy.has('course-form')" placeholder="便于识别这门课的名称" maxlength="120" /></el-form-item>
         <el-form-item label="学习链接" required><el-input v-model="learningUrl" :disabled="busy.has('course-form')" type="textarea" :rows="3" placeholder="粘贴实际课程或视频学习页面的 HTTPS 链接，不要填写网站首页" maxlength="2048" /></el-form-item>
-        <p class="form-hint">{{ editingCourse ? '已有任务的课程更换链接时，将保存为新课程并保留原历史。' : '课程名称会从网页自动提取。如网页需要登录，请在打开的课程窗口中完成人工登录。' }}</p>
+        <p class="form-hint">{{ editingCourse ? '已有任务的课程更换链接时，将保存为新课程并保留原历史。' : '课程名称会从网页自动提取。如需登录，请先点击网站设置中的“登录”，或开启“显示浏览器”后在课程窗口完成人工登录。' }}</p>
         <p v-if="busy.has('course-form') && !editingCourse" role="status" class="form-hint">正在读取课程名称，读取成功后自动添加……</p>
         <p v-if="formError" class="log-error" role="alert">{{ formError }}</p>
         <div class="dialog-actions"><el-button :disabled="busy.has('course-form')" @click="courseDialog = false">取消</el-button><el-button native-type="submit" type="primary" :loading="busy.has('course-form')">{{ editingCourse ? '保存课程' : '读取并添加课程' }}</el-button></div>

@@ -21,14 +21,19 @@ export async function isAuthenticated(frame: Frame | Page, platformId: PlatformI
     if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443')
       || !(id === 'henan' ? url.origin === 'https://yuancheng.henanyixue.com'
         : url.hostname === '91huayi.com' || url.hostname.endsWith('.91huayi.com'))) return false;
-    const visible = (node: Element | null): boolean => !!node && node.getClientRects().length > 0
-      && getComputedStyle(node).visibility !== 'hidden';
-    if ([...document.querySelectorAll('input[type="password"]')].some(visible)) return false;
+    const visibility = { visible(node: Element | null): boolean { return !!node && node.getClientRects().length > 0
+      && getComputedStyle(node).visibility !== 'hidden'; } };
+    if ([...document.querySelectorAll('input[type="password"]')].some(visibility.visible)) return false;
     if ([...document.querySelectorAll('a, button, li, [role="button"], .logout')]
-      .some(node => visible(node) && /^(?:退出(?:登录|登陆|账号)?|注销(?:登录|登陆|账号)?)$/.test(node.textContent?.trim() ?? ''))) return true;
+      .some(node => visibility.visible(node) && /^(?:退出(?:登录|登陆|账号)?|注销(?:登录|登陆|账号)?)$/.test(node.textContent?.trim() ?? ''))) return true;
+    // CME 课程页经服务端鉴权后才提供账号标识和目录，页面没有退出按钮。
+    // 同时要求正确的课程地址、服务端账号标识及可见目录，不能仅凭 Cookie 判断。
+    if (id === 'huayi' && url.pathname.toLowerCase() === '/pages/course.aspx' && url.searchParams.has('cid')
+      && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test((window as unknown as { cmeUserId?: string }).cmeUserId ?? '')
+      && visibility.visible(document.querySelector('.course[data-href] .cw-title-link'))) return true;
     // 华医网首页的退出菜单在鼠标悬停前隐藏，登录后显示独立的账号区域。
-    return id === 'huayi' && visible(document.querySelector('#ifssologed'))
-      && !visible(document.querySelector('#ssologin'));
+    return id === 'huayi' && visibility.visible(document.querySelector('#ifssologed'))
+      && !visibility.visible(document.querySelector('#ssologin'));
   }, platformId).catch(() => false); // 跳转时的执行上下文失效，下次再检查。
 }
 

@@ -65,7 +65,7 @@ export class Scheduler {
           reject(new StoreError('读取课程名称超时，未添加课程，请重试', 422));
         }, 220_000);
         child.on('message', onMessage); child.once('close', onClose); child.once('error', onError);
-        child.send({ type: 'course_name', requestId, url, platformId: account.platformId, profileDir, channel: this.options.channel }, error => { if (error) onError(); });
+        child.send({ type: 'course_name', requestId, url, platformId: account.platformId, profileDir, channel: this.options.channel, showBrowser: account.showBrowser }, error => { if (error) onError(); });
       });
       if (this.closed) throw new StoreError('服务正在关闭，未添加课程');
       return name;
@@ -142,7 +142,8 @@ export class Scheduler {
         resolveExit();
         this.pump();
       });
-      child.send({ type: 'start', job, platformId: this.store.account(job.accountId)!.platformId, profileDir, channel: this.options.channel }, () => {});
+      const account = this.store.account(job.accountId)!;
+      child.send({ type: 'start', job, platformId: account.platformId, profileDir, channel: this.options.channel, showBrowser: account.showBrowser }, () => {});
     }
   }
 

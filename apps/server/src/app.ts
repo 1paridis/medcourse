@@ -104,6 +104,12 @@ export async function createApp(options: {
     return reply.code(204).send();
   });
 
+  app.patch<{ Params: { id: string }; Body: { showBrowser: boolean } }>('/api/accounts/:id/browser', {
+    schema: { body: { type: 'object', additionalProperties: false, required: ['showBrowser'], properties: {
+      showBrowser: { type: 'boolean' },
+    } } },
+  }, async request => store.setShowBrowser(request.params.id, request.body.showBrowser));
+
   app.post<{ Body: { accountId: string; kind: JobKind; url?: string; courseId?: string } }>('/api/jobs', {
     schema: { body: { type: 'object', additionalProperties: false, required: ['accountId', 'kind'], properties: {
       accountId: { type: 'string', minLength: 1 }, kind: { type: 'string', enum: ['login', 'inspect', 'playlist'] },
@@ -125,7 +131,7 @@ export async function createApp(options: {
     if (request.body.kind === 'playlist' && account.platformId === 'henan' && (!courseUrl(url) || account.loginState !== 'saved')) return reply.code(400).send({ message: '请先完成人工登录，状态会自动记录，再进入目标课程播放页' });
     if (scheduler.isAccountBusy(account.id)) return reply.code(409).send({ message: '该账号已有任务，不能同时登录或检查' });
     const job = store.createJob(account.id, request.body.kind, url, course?.id);
-    store.log(job.id, 'info', request.body.kind === 'login' ? '人工登录任务已创建' : request.body.kind === 'playlist' ? '播放列表读取任务已创建' : '无头页面检查任务已创建');
+    store.log(job.id, 'info', request.body.kind === 'login' ? '人工登录任务已创建' : request.body.kind === 'playlist' ? '播放列表读取任务已创建' : '页面检查任务已创建');
     scheduler.pump();
     return reply.code(201).send(job);
   });
